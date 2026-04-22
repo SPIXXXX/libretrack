@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "499386564343",
+    "project_id": "libretrack-bd2b8",
+    "storage_bucket": "libretrack-bd2b8.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:499386564343:android:4616022876684c3e771df2",
+        "android_client_info": {
+          "package_name": "com.example.libretrack"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB3cbh50Sbl3dTs9ooS_2zxliRdpA6EOVU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
