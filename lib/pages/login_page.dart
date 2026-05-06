@@ -1,10 +1,8 @@
+// FirebaseAuth is used here to sign in existing LibraTrack users.
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-
-// TODO: Import Firebase Auth package
-// import 'package:firebase_auth/firebase_auth.dart';
-
-// TODO: Import your register page
-// import 'register_page.dart';
+import 'package:libretrack/pages/Student/student_page.dart';
+import 'package:libretrack/pages/register_page.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -17,21 +15,19 @@ class _LoginPageState extends State<LoginPage> {
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _obscurePassword = true;
+  bool _isLoading = false;
 
-  // TODO: Add Firebase Auth login logic
-  // Future<void> _login() async {
-  //   try {
-  //     await FirebaseAuth.instance.signInWithEmailAndPassword(
-  //       email: _emailController.text.trim(),
-  //       password: _passwordController.text.trim(),
-  //     );
-  //     // Navigate to home page on success
-  //   } on FirebaseAuthException catch (e) {
-  //     ScaffoldMessenger.of(context).showSnackBar(
-  //       SnackBar(content: Text(e.message ?? 'Login failed')),
-  //     );
-  //   }
-  // }
+  // Firebase login implementation:
+  // 1. Read the email and password from the text fields.
+  // 2. Trim the email so accidental spaces do not break login.
+  // 3. Ask Firebase Authentication to verify the account.
+  // 4. If Firebase accepts it, the button code below opens StudentPage.
+  Future<void> signIn() async {
+    await FirebaseAuth.instance.signInWithEmailAndPassword(
+      email: _emailController.text.trim(),
+      password: _passwordController.text,
+    );
+  }
 
   @override
   void dispose() {
@@ -58,10 +54,6 @@ class _LoginPageState extends State<LoginPage> {
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       // ─── Logo ───────────────────────────────────────────
-                      // TODO: Add logo.png to assets/images/ and register in pubspec.yaml:
-                      //   flutter:
-                      //     assets:
-                      //       - assets/images/logo.png
                       Image.asset(
                         'assets/images/logo.png',
                         width: 200,
@@ -101,7 +93,7 @@ class _LoginPageState extends State<LoginPage> {
                       _InputField(
                         controller: _emailController,
                         label: 'Email',
-                        icon: Icons.person_outline_rounded,
+                        icon: Icons.mail_outline_rounded,
                         keyboardType: TextInputType.emailAddress,
                       ),
 
@@ -161,10 +153,38 @@ class _LoginPageState extends State<LoginPage> {
                         width: double.infinity,
                         height: 56,
                         child: ElevatedButton(
-                          onPressed: () {
-                            // TODO: Call _login() once Firebase is set up
-                            // _login();
-                          },
+                          onPressed: _isLoading
+                              ? null
+                              : () async {
+                                  setState(() => _isLoading = true);
+                                  try {
+                                    await signIn();
+                                    // Navigate to student page on successful login
+                                    if (mounted && context.mounted) {
+                                      Navigator.pushReplacement(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (context) =>
+                                              const StudentPage(),
+                                        ),
+                                      );
+                                    }
+                                  } on FirebaseAuthException catch (e) {
+                                    // Show error message on failed login
+                                    if (mounted && context.mounted) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            e.message ?? 'Login failed',
+                                          ),
+                                        ),
+                                      );
+                                      setState(() => _isLoading = false);
+                                    }
+                                  }
+                                },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF3C13C5),
                             foregroundColor: const Color(0xF2F2F2F2),
@@ -173,21 +193,33 @@ class _LoginPageState extends State<LoginPage> {
                             ),
                             elevation: 0,
                           ),
-                          child: const Text(
-                            'Login',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                          child: _isLoading
+                              ? const SizedBox(
+                                  height: 24,
+                                  width: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                      Color(0xF2F2F2F2),
+                                    ),
+                                  ),
+                                )
+                              : const Text(
+                                  'Login',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                         ),
                       ),
 
                       const SizedBox(height: 24),
 
                       // ─── Register row ────────────────────────────────────
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
                           const Text(
                             'Not registered yet? ',
@@ -201,13 +233,12 @@ class _LoginPageState extends State<LoginPage> {
                             cursor: SystemMouseCursors.click,
                             child: GestureDetector(
                               onTap: () {
-                                // TODO: Uncomment and replace with your register page
-                                // Navigator.push(
-                                //   context,
-                                //   MaterialPageRoute(
-                                //     builder: (context) => const RegisterPage(),
-                                //   ),
-                                // );
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) => const RegisterPage(),
+                                  ),
+                                );
                               },
                               child: const Text(
                                 'Register here',
@@ -237,15 +268,8 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
-/// Reusable styled input field with floating label
-class _InputField extends StatefulWidget {
-  final TextEditingController controller;
-  final String label;
-  final IconData icon;
-  final bool obscureText;
-  final TextInputType keyboardType;
-  final Widget? suffixIcon;
-
+/// Reusable styled input field matching the register page fields.
+class _InputField extends StatelessWidget {
   const _InputField({
     required this.controller,
     required this.label,
@@ -255,133 +279,58 @@ class _InputField extends StatefulWidget {
     this.suffixIcon,
   });
 
-  @override
-  State<_InputField> createState() => _InputFieldState();
-}
-
-class _InputFieldState extends State<_InputField> {
-  final FocusNode _focusNode = FocusNode();
-  bool _isFocused = false;
-  bool _hasText = false;
-
-  @override
-  void initState() {
-    super.initState();
-
-    _focusNode.addListener(() {
-      setState(() {
-        _isFocused = _focusNode.hasFocus;
-      });
-    });
-
-    widget.controller.addListener(() {
-      setState(() {
-        _hasText = widget.controller.text.isNotEmpty;
-      });
-    });
-  }
-
-  @override
-  void dispose() {
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  // Label floats up when focused or has text
-  bool get _isFloating => _isFocused || _hasText;
+  final TextEditingController controller;
+  final String label;
+  final IconData icon;
+  final bool obscureText;
+  final TextInputType keyboardType;
+  final Widget? suffixIcon;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 64,
-      decoration: BoxDecoration(
-        color: const Color(0xFFEBF1F1),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x40000000),
-            blurRadius: 4,
-            offset: Offset(0, 4),
-          ),
-        ],
-        border: Border.all(
-          color: _isFocused ? const Color(0xFF3C13C5) : Colors.transparent,
-          width: 1.5,
-        ),
-      ),
-      child: Row(
-        children: [
-          const SizedBox(width: 11),
-
-          // Icon badge
-          Container(
+    return TextField(
+      controller: controller,
+      obscureText: obscureText,
+      keyboardType: keyboardType,
+      style: const TextStyle(fontSize: 16, color: Color(0xFF333333)),
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Padding(
+          padding: const EdgeInsets.fromLTRB(11, 10, 10, 10),
+          child: Container(
             width: 40,
             height: 35,
             decoration: BoxDecoration(
               color: const Color(0xFFCBCED1),
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Icon(
-              widget.icon,
-              size: 22,
-              color: _isFocused
-                  ? const Color(0xFF3C13C5)
-                  : const Color(0xFF1E1E1E),
-            ),
+            child: Icon(icon, size: 22, color: const Color(0xFF1E1E1E)),
           ),
-
-          const SizedBox(width: 12),
-
-          // Label + input stacked
-          Expanded(
-            child: Stack(
-              children: [
-                // Floating label
-                AnimatedPositioned(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOut,
-                  top: _isFloating ? 6 : 20,
-                  left: 0,
-                  child: AnimatedDefaultTextStyle(
-                    duration: const Duration(milliseconds: 180),
-                    curve: Curves.easeOut,
-                    style: TextStyle(
-                      fontSize: _isFloating ? 11 : 16,
-                      fontWeight: FontWeight.w500,
-                      color: _isFocused
-                          ? const Color(0xFF3C13C5)
-                          : const Color(0xFFB1B1B1),
-                    ),
-                    child: Text(widget.label),
-                  ),
-                ),
-
-                // Actual text input — sits below the floating label
-                Padding(
-                  padding: const EdgeInsets.only(top: 26),
-                  child: TextField(
-                    controller: widget.controller,
-                    focusNode: _focusNode,
-                    obscureText: widget.obscureText,
-                    keyboardType: widget.keyboardType,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      color: Color(0xFF333333),
-                    ),
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          if (widget.suffixIcon != null) widget.suffixIcon!,
-          const SizedBox(width: 8),
-        ],
+        ),
+        prefixIconConstraints: const BoxConstraints(
+          minWidth: 61,
+          minHeight: 56,
+        ),
+        suffixIcon: suffixIcon,
+        filled: true,
+        fillColor: const Color(0xFFEBF1F1),
+        labelStyle: const TextStyle(fontSize: 16, color: Color(0xFF8C8C8C)),
+        floatingLabelStyle: const TextStyle(
+          color: Color(0xFF3C13C5),
+          fontWeight: FontWeight.w500,
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 20,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(20),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(20),
+          borderSide: const BorderSide(color: Color(0xFF3C13C5), width: 1.5),
+        ),
       ),
     );
   }
