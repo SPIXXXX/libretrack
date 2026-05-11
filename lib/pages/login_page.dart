@@ -1,7 +1,10 @@
 // FirebaseAuth is used here to sign in existing LibraTrack users.
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:libretrack/pages/Student/student_page.dart';
+import 'package:libretrack/pages/Librarian/librarian_page.dart';
+import 'package:libretrack/pages/Student/home_page.dart';
+import 'package:libretrack/pages/forgot_password_page.dart';
 import 'package:libretrack/pages/register_page.dart';
 
 class LoginPage extends StatefulWidget {
@@ -21,12 +24,31 @@ class _LoginPageState extends State<LoginPage> {
   // 1. Read the email and password from the text fields.
   // 2. Trim the email so accidental spaces do not break login.
   // 3. Ask Firebase Authentication to verify the account.
-  // 4. If Firebase accepts it, the button code below opens StudentPage.
-  Future<void> signIn() async {
-    await FirebaseAuth.instance.signInWithEmailAndPassword(
+  // 4. If Firebase accepts it, the role saved in Firestore picks the page.
+  Future<User> signIn() async {
+    final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
       email: _emailController.text.trim(),
       password: _passwordController.text,
     );
+    return credential.user!;
+  }
+
+  Future<Widget> _landingPageFor(User user) async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get();
+    final data = snapshot.data();
+    final role = (data?['role'] ?? data?['accountType'] ?? 'student')
+        .toString()
+        .trim()
+        .toLowerCase();
+
+    if (role == 'librarian') {
+      return const LibrarianPage();
+    }
+
+    return const StudentPage();
   }
 
   @override
@@ -128,7 +150,14 @@ class _LoginPageState extends State<LoginPage> {
                         alignment: Alignment.centerRight,
                         child: TextButton(
                           onPressed: () {
-                            // TODO: Navigate to forgot password page
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => ForgotPasswordPage(
+                                  initialEmail: _emailController.text.trim(),
+                                ),
+                              ),
+                            );
                           },
                           style: TextButton.styleFrom(
                             padding: EdgeInsets.zero,
@@ -158,14 +187,15 @@ class _LoginPageState extends State<LoginPage> {
                               : () async {
                                   setState(() => _isLoading = true);
                                   try {
-                                    await signIn();
-                                    // Navigate to student page on successful login
+                                    final user = await signIn();
+                                    final landingPage = await _landingPageFor(
+                                      user,
+                                    );
                                     if (mounted && context.mounted) {
                                       Navigator.pushReplacement(
                                         context,
                                         MaterialPageRoute(
-                                          builder: (context) =>
-                                              const StudentPage(),
+                                          builder: (context) => landingPage,
                                         ),
                                       );
                                     }

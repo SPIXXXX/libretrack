@@ -18,11 +18,19 @@ dependencies:
   http: ^1.1.0
   file_picker: ^8.1.2
   url_launcher: ^6.3.2
+  mobile_scanner: ^7.2.0
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/icon.png"
 
 flutter:
   uses-material-design: true

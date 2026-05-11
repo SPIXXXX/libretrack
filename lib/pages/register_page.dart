@@ -8,7 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:libretrack/pages/Student/student_page.dart';
+import 'package:libretrack/pages/Student/home_page.dart';
 import 'package:libretrack/services/storage_service.dart';
 
 class RegisterPage extends StatefulWidget {
@@ -35,7 +35,7 @@ class _RegisterPageState extends State<RegisterPage> {
   final ImagePicker _imagePicker = ImagePicker();
   final StorageService _storageService = StorageService();
   String? _profileImageUrl;
-  bool _isUploadingImage = false;
+  final bool _isUploadingImage = false;
 
   @override
   void dispose() {
@@ -135,33 +135,6 @@ class _RegisterPageState extends State<RegisterPage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Failed to pick image: $e')));
-      }
-    }
-  }
-
-  Future<void> _uploadProfileImage() async {
-    if (_selectedImage == null) return;
-
-    setState(() => _isUploadingImage = true);
-    try {
-      _profileImageUrl = await _storageService.uploadProfilePicture(
-        _selectedImage!,
-      );
-      setState(() => _isUploadingImage = false);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Profile picture uploaded successfully!'),
-          ),
-        );
-      }
-    } catch (e) {
-      setState(() => _isUploadingImage = false);
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Upload failed: $e')));
       }
     }
   }
@@ -323,19 +296,6 @@ class _RegisterPageState extends State<RegisterPage> {
         return 'Please check your internet connection and try again.';
       default:
         return e.message ?? 'Registration failed. Please try again.';
-    }
-  }
-
-  String _firebaseDataMessage(FirebaseException e) {
-    switch (e.code) {
-      case 'permission-denied':
-        return 'Account created, but Firestore rules blocked profile saving.';
-      case 'unavailable':
-        return 'Account created, but Firestore is unavailable. Try again later.';
-      case 'not-found':
-        return 'Account created, but Firestore Database is not enabled yet.';
-      default:
-        return 'Account created, but profile saving failed: ${e.message ?? e.code}.';
     }
   }
 
@@ -504,7 +464,7 @@ class _RegisterPageState extends State<RegisterPage> {
                         controlAffinity: ListTileControlAffinity.leading,
                         activeColor: const Color(0xFF3C13C5),
                         title: const Text(
-                          'I agree with LibraTrack Terms of Service, Privacy Policy, and default Notification Settings.',
+                          'I agree with LibraTrack Terms of Service and Privacy Policy.',
                           style: TextStyle(
                             fontSize: 12,
                             height: 1.35,

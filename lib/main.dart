@@ -1,8 +1,10 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'pages/login_page.dart';
-import 'pages/Student/student_page.dart';
+import 'pages/Librarian/librarian_page.dart';
+import 'pages/Student/home_page.dart';
 
 void main() async {
   // Firebase setup starts here.
@@ -61,11 +63,50 @@ class AuthGate extends StatelessWidget {
           );
         }
 
-        if (snapshot.hasData) {
-          return const StudentPage();
+        final user = snapshot.data;
+        if (user != null) {
+          return RoleGate(user: user);
         }
 
         return const LoginPage();
+      },
+    );
+  }
+}
+
+class RoleGate extends StatelessWidget {
+  const RoleGate({super.key, required this.user});
+
+  final User user;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      future: FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            backgroundColor: Color(0xFFE3E7EB),
+            body: Center(
+              child: CircularProgressIndicator(color: Color(0xFF3C13C5)),
+            ),
+          );
+        }
+
+        final data = snapshot.data?.data();
+        final role = (data?['role'] ?? data?['accountType'] ?? 'student')
+            .toString()
+            .trim()
+            .toLowerCase();
+
+        if (role == 'librarian') {
+          return const LibrarianPage();
+        }
+
+        return const StudentPage();
       },
     );
   }

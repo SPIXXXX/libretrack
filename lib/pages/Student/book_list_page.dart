@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:libretrack/pages/Student/book_details_page.dart';
+import 'package:libretrack/services/student_library_service.dart';
 
 class BookListPage extends StatefulWidget {
   const BookListPage({super.key});
@@ -12,53 +14,13 @@ class BookListPage extends StatefulWidget {
 class _BookListPageState extends State<BookListPage>
     with SingleTickerProviderStateMixin {
   // TODO: Connect this page to the real backend once the librarian workflow is ready.
-  //
-  // ARCHITECTURE:
-  // - Librarian Page: Manages books, book info, categories, borrow records, and
-  //   library stats. Librarians add/edit books and their metadata.
-  // - Student Page (this page): Displays librarian-managed books in organized way.
-  //   Students can search, filter, and view book details.
-  // - PDF Module Reading: Students can open school module PDFs directly in the app
-  //   for organized reading and learning.
-  // - Review System: Students can write reviews, add comments, and share thoughts
-  //   about books to help other students.
-  //
-  // DATA STORAGE BREAKDOWN:
-  // - Firestore:
-  //   * Book info (title, author, description, ISBN, etc.)
-  //   * User data (profiles, reading preferences)
-  //   * Borrow records (who borrowed what, when, due dates)
-  //   * Statistics (most borrowed, user reading habits)
-  //   * Reviews and comments (student feedback on books)
-  // - Cloudinary:
-  //   * Book cover images
-  //   * Student profile photos
-  // - Google Drive:
-  //   * School module PDFs for in-app reading
-  // - Firebase FCM:
-  //   * Push notifications (borrow reminders, new books, return due dates)
-  //
-  // FEATURES TO IMPLEMENT:
-  // 1. Sync books data from Firestore
-  // 2. Load book cover images from Cloudinary
-  // 3. Implement search and filter with Firestore queries
-  // 4. Add review/comment UI and sync with Firestore
-  // 5. Link to Google Drive PDFs for reading
-  // 6. Setup borrow functionality
-  // 7. Implement FCM for notifications
+
   int _selectedCategory = 0;
   bool _sortAZ = false;
   String _searchQuery = '';
   late final AnimationController _pageAnimation;
   late final TextEditingController _searchController;
   late final TextEditingController _categoryController;
-
-  final List<String> _categories = [
-    'Favorites',
-    'Want to read',
-    'Science',
-    'History',
-  ];
 
   @override
   void initState() {
@@ -70,10 +32,10 @@ class _BookListPageState extends State<BookListPage>
       duration: const Duration(milliseconds: 760),
     )..forward();
 
-    // TODO: (2) Setup FCM for push notifications
-    // - Request user permissions
-    // - Listen for borrow reminders, new books, return due dates
-    // - Handle notification routing
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      StudentLibraryService.ensureDefaultCategory(user.uid);
+    }
   }
 
   @override
@@ -85,24 +47,31 @@ class _BookListPageState extends State<BookListPage>
   }
 
   Stream<List<_BookListItem>> _bookStream() {
-    return FirebaseFirestore.instance
-        .collection('books')
-        .orderBy('created_at', descending: true)
-        .snapshots()
-        .map((snapshot) {
-          return snapshot.docs.map(_BookListItem.fromDoc).toList();
-        });
+    return FirebaseFirestore.instance.collection('books').snapshots().map((
+      snapshot,
+    ) {
+      final books = snapshot.docs.map(_BookListItem.fromDoc).toList();
+      books.sort((a, b) => b.createdAtMillis.compareTo(a.createdAtMillis));
+      return books;
+    });
   }
 
-  List<_BookListItem> _visibleBooks(List<_BookListItem> books) {
+  List<_BookListItem> _visibleBooks(
+    List<_BookListItem> books, {
+    required Map<String, StudentBookLibraryEntry> libraryEntries,
+    required String selectedCategory,
+  }) {
     final query = _searchQuery.trim().toLowerCase();
     final filtered = books.where((book) {
+      final entry = libraryEntries[book.id];
+      final matchesCategory =
+          entry != null && entry.categories.contains(selectedCategory);
       final matchesSearch =
           query.isEmpty ||
           book.title.toLowerCase().contains(query) ||
           book.author.toLowerCase().contains(query) ||
           book.description.toLowerCase().contains(query);
-      return matchesSearch;
+      return matchesCategory && matchesSearch;
     }).toList();
 
     if (_sortAZ) {
@@ -125,148 +94,185 @@ class _BookListPageState extends State<BookListPage>
 
   @override
   Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return const ColoredBox(
+        color: Color(0xFFE3E7EB),
+        child: _BookListMessage(
+          icon: Icons.person_off_outlined,
+          message: 'Please log in to view your books.',
+        ),
+      );
+    }
+
     return ColoredBox(
       color: const Color(0xFFE3E7EB),
-      child: RefreshIndicator(
-        onRefresh: _refreshBooks,
-        color: const Color(0xFF2BA6A3),
-        child: CustomScrollView(
-          physics: const AlwaysScrollableScrollPhysics(
-            parent: BouncingScrollPhysics(),
-          ),
-          slivers: [
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 28, 24, 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _PageEntrance(
-                      animation: _pageAnimation,
-                      begin: 0.00,
-                      end: 0.45,
-                      child: _buildHeader(),
+      child: StreamBuilder<List<String>>(
+        stream: StudentLibraryService.categoriesStream(user.uid),
+        builder: (context, categorySnapshot) {
+          final categories =
+              categorySnapshot.data ?? [StudentLibraryService.favorites];
+          final selectedIndex = _selectedCategory < categories.length
+              ? _selectedCategory
+              : 0;
+          final selectedCategory = categories[selectedIndex];
+
+          return StreamBuilder<Map<String, StudentBookLibraryEntry>>(
+            stream: StudentLibraryService.libraryEntriesStream(user.uid),
+            builder: (context, librarySnapshot) {
+              final libraryEntries = librarySnapshot.data ?? {};
+
+              return RefreshIndicator(
+                onRefresh: _refreshBooks,
+                color: const Color(0xFF2BA6A3),
+                child: CustomScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(
+                    parent: BouncingScrollPhysics(),
+                  ),
+                  slivers: [
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 28, 24, 0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _PageEntrance(
+                              animation: _pageAnimation,
+                              begin: 0.00,
+                              end: 0.45,
+                              child: _buildHeader(categories),
+                            ),
+                            _PageEntrance(
+                              animation: _pageAnimation,
+                              begin: 0.10,
+                              end: 0.55,
+                              child: _buildSearchSection(),
+                            ),
+                            _PageEntrance(
+                              animation: _pageAnimation,
+                              begin: 0.20,
+                              end: 0.68,
+                              child: _buildCategories(
+                                categories: categories,
+                                selectedIndex: selectedIndex,
+                              ),
+                            ),
+                            const SizedBox(height: 28),
+                          ],
+                        ),
+                      ),
                     ),
-                    _PageEntrance(
-                      animation: _pageAnimation,
-                      begin: 0.10,
-                      end: 0.55,
-                      child: _buildSearchSection(),
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 28),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            return StreamBuilder<List<_BookListItem>>(
+                              stream: _bookStream(),
+                              builder: (context, snapshot) {
+                                if (snapshot.hasError) {
+                                  return _BookListMessage(
+                                    icon: Icons.error_outline_rounded,
+                                    message:
+                                        'Could not load books: ${snapshot.error}',
+                                  );
+                                }
+
+                                if (snapshot.connectionState ==
+                                        ConnectionState.waiting &&
+                                    !snapshot.hasData) {
+                                  return const Center(
+                                    child: CircularProgressIndicator(),
+                                  );
+                                }
+
+                                final books = _visibleBooks(
+                                  snapshot.data ?? [],
+                                  libraryEntries: libraryEntries,
+                                  selectedCategory: selectedCategory,
+                                );
+                                if (books.isEmpty) {
+                                  return _BookListMessage(
+                                    icon: Icons.library_books_outlined,
+                                    message:
+                                        'No books in $selectedCategory yet.',
+                                  );
+                                }
+
+                                return _buildBookGrid(
+                                  constraints: constraints,
+                                  books: books,
+                                  libraryEntries: libraryEntries,
+                                );
+                              },
+                            );
+                          },
+                        ),
+                      ),
                     ),
-                    _PageEntrance(
-                      animation: _pageAnimation,
-                      begin: 0.20,
-                      end: 0.68,
-                      child: _buildProgressCards(),
-                    ),
-                    const SizedBox(height: 28),
-                    _PageEntrance(
-                      animation: _pageAnimation,
-                      begin: 0.32,
-                      end: 0.78,
-                      child: _buildCategories(),
-                    ),
-                    const SizedBox(height: 28),
                   ],
                 ),
-              ),
-            ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 28),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    return StreamBuilder<List<_BookListItem>>(
-                      stream: _bookStream(),
-                      builder: (context, snapshot) {
-                        if (snapshot.hasError) {
-                          return _BookListMessage(
-                            icon: Icons.error_outline_rounded,
-                            message: 'Could not load books: ${snapshot.error}',
-                          );
-                        }
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
 
-                        if (snapshot.connectionState ==
-                                ConnectionState.waiting &&
-                            !snapshot.hasData) {
-                          return const Center(
-                            child: CircularProgressIndicator(),
-                          );
-                        }
+  Widget _buildBookGrid({
+    required BoxConstraints constraints,
+    required List<_BookListItem> books,
+    required Map<String, StudentBookLibraryEntry> libraryEntries,
+  }) {
+    const minCardWidth = 132.0;
+    const maxCardWidth = 156.0;
+    const spacing = 18.0;
+    var cardsPerRow = 1;
 
-                        final books = _visibleBooks(snapshot.data ?? []);
-                        if (books.isEmpty) {
-                          return const _BookListMessage(
-                            icon: Icons.library_books_outlined,
-                            message: 'No books found yet.',
-                          );
-                        }
+    for (var columns = 4; columns >= 1; columns--) {
+      final requiredWidth =
+          (minCardWidth * columns) + (spacing * (columns - 1));
+      if (requiredWidth <= constraints.maxWidth) {
+        cardsPerRow = columns;
+        break;
+      }
+    }
 
-                        const minCardWidth = 132.0;
-                        const maxCardWidth = 156.0;
-                        const spacing = 18.0;
-                        var cardsPerRow = 1;
+    final cardWidth =
+        ((constraints.maxWidth - (spacing * (cardsPerRow - 1))) / cardsPerRow)
+            .clamp(minCardWidth, maxCardWidth);
+    final rowWidth = (cardWidth * cardsPerRow) + (spacing * (cardsPerRow - 1));
 
-                        for (var columns = 4; columns >= 1; columns--) {
-                          final requiredWidth =
-                              (minCardWidth * columns) +
-                              (spacing * (columns - 1));
-                          if (requiredWidth <= constraints.maxWidth) {
-                            cardsPerRow = columns;
-                            break;
-                          }
-                        }
-
-                        final cardWidth =
-                            ((constraints.maxWidth -
-                                        (spacing * (cardsPerRow - 1))) /
-                                    cardsPerRow)
-                                .clamp(minCardWidth, maxCardWidth);
-                        final rowWidth =
-                            (cardWidth * cardsPerRow) +
-                            (spacing * (cardsPerRow - 1));
-
-                        return Center(
-                          child: SizedBox(
-                            width: rowWidth,
-                            child: Wrap(
-                              alignment: WrapAlignment.start,
-                              spacing: spacing,
-                              runSpacing: 30,
-                              children: List.generate(books.length, (index) {
-                                return SizedBox(
-                                  width: cardWidth,
-                                  child: _PageEntrance(
-                                    animation: _pageAnimation,
-                                    begin: (0.36 + (index * 0.035)).clamp(
-                                      0.36,
-                                      0.72,
-                                    ),
-                                    end: (0.80 + (index * 0.025)).clamp(
-                                      0.80,
-                                      1.00,
-                                    ),
-                                    offset: 18,
-                                    child: _BookTile(book: books[index]),
-                                  ),
-                                );
-                              }),
-                            ),
-                          ),
-                        );
-                      },
-                    );
-                  },
+    return Center(
+      child: SizedBox(
+        width: rowWidth,
+        child: Wrap(
+          alignment: WrapAlignment.start,
+          spacing: spacing,
+          runSpacing: 30,
+          children: List.generate(books.length, (index) {
+            final book = books[index];
+            return SizedBox(
+              width: cardWidth,
+              child: _PageEntrance(
+                animation: _pageAnimation,
+                begin: (0.36 + (index * 0.035)).clamp(0.36, 0.72),
+                end: (0.80 + (index * 0.025)).clamp(0.80, 1.00),
+                offset: 18,
+                child: _BookTile(
+                  book: book,
+                  isFavorite: libraryEntries[book.id]?.isFavorite ?? false,
                 ),
               ),
-            ),
-          ],
+            );
+          }),
         ),
       ),
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(List<String> categories) {
     return SizedBox(
       height: 58,
       child: Row(
@@ -281,7 +287,7 @@ class _BookListPageState extends State<BookListPage>
           ),
           const Spacer(),
           _AniyomiIconButton(
-            onPressed: _showCategoryManager,
+            onPressed: () => _showCategoryManager(categories),
             icon: const Icon(Icons.library_add_outlined),
             color: const Color(0xFF121926),
             iconSize: 32,
@@ -464,8 +470,9 @@ class _BookListPageState extends State<BookListPage>
     );
   }
 
-  void _showCategoryManager() {
+  void _showCategoryManager(List<String> categories) {
     _categoryController.clear();
+    final sheetCategories = [...categories];
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -476,18 +483,34 @@ class _BookListPageState extends State<BookListPage>
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            void addCategory() {
+            Future<void> addCategory() async {
+              final user = FirebaseAuth.instance.currentUser;
+              if (user == null) {
+                return;
+              }
+
               final category = _categoryController.text.trim();
               if (category.isEmpty) {
                 return;
               }
 
+              final alreadyExists = sheetCategories.any(
+                (value) => value.toLowerCase() == category.toLowerCase(),
+              );
+              if (alreadyExists) {
+                return;
+              }
+
               setState(() {
-                _categories.add(category);
-                _selectedCategory = _categories.length - 1;
+                _selectedCategory = sheetCategories.length;
               });
-              setSheetState(() {});
+              sheetCategories.add(category);
               _categoryController.clear();
+              await StudentLibraryService.addCategory(
+                uid: user.uid,
+                category: category,
+              );
+              setSheetState(() {});
             }
 
             return Padding(
@@ -514,9 +537,9 @@ class _BookListPageState extends State<BookListPage>
                     Wrap(
                       spacing: 10,
                       runSpacing: 10,
-                      children: List.generate(_categories.length, (index) {
+                      children: List.generate(sheetCategories.length, (index) {
                         return _FilterChipButton(
-                          label: _categories[index],
+                          label: sheetCategories[index],
                           selected: index == _selectedCategory,
                           onTap: () {
                             setState(() => _selectedCategory = index);
@@ -546,7 +569,7 @@ class _BookListPageState extends State<BookListPage>
                         ),
                         const SizedBox(width: 12),
                         _AniyomiTapResponse(
-                          onTap: addCategory,
+                          onTap: () => addCategory(),
                           child: Container(
                             height: 54,
                             width: 54,
@@ -573,43 +596,10 @@ class _BookListPageState extends State<BookListPage>
     );
   }
 
-  Widget _buildProgressCards() {
-    // TODO: (6) Setup borrow functionality
-    // - Fetch user's borrow records from Firestore
-    // - Calculate reading stats (in progress, completed)
-    // - Show borrow history and due dates
-    // - Add borrow/return buttons
-    // TODO: IMPLEMENT - Fetch borrow records from Firebase
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 380;
-        final spacing = compact ? 14.0 : 22.0;
-        return Row(
-          children: [
-            Expanded(
-              child: _ProgressCard(
-                icon: Icons.menu_book_rounded,
-                title: 'In progress',
-                count: '0 Books',
-                compact: compact,
-              ),
-            ),
-            SizedBox(width: spacing),
-            Expanded(
-              child: _ProgressCard(
-                icon: Icons.bookmark_rounded,
-                title: compact ? 'Completed\nbooks' : 'Completed books',
-                count: '1 Books',
-                compact: compact,
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildCategories() {
+  Widget _buildCategories({
+    required List<String> categories,
+    required int selectedIndex,
+  }) {
     return DecoratedBox(
       decoration: const BoxDecoration(
         border: Border(
@@ -620,11 +610,11 @@ class _BookListPageState extends State<BookListPage>
         scrollDirection: Axis.horizontal,
         physics: const BouncingScrollPhysics(),
         child: Row(
-          children: List.generate(_categories.length, (index) {
-            final isSelected = _selectedCategory == index;
+          children: List.generate(categories.length, (index) {
+            final isSelected = selectedIndex == index;
             return Padding(
               padding: EdgeInsets.only(
-                right: index == _categories.length - 1 ? 0 : 28,
+                right: index == categories.length - 1 ? 0 : 28,
               ),
               child: _AniyomiTapResponse(
                 onTap: () => setState(() => _selectedCategory = index),
@@ -642,7 +632,7 @@ class _BookListPageState extends State<BookListPage>
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 6),
                     child: Text(
-                      _categories[index],
+                      categories[index],
                       maxLines: 1,
                       style: TextStyle(
                         color: isSelected
@@ -781,85 +771,6 @@ class _AniyomiTapResponseState extends State<_AniyomiTapResponse> {
   }
 }
 
-class _ProgressCard extends StatelessWidget {
-  const _ProgressCard({
-    required this.icon,
-    required this.title,
-    required this.count,
-    this.compact = false,
-  });
-
-  final IconData icon;
-  final String title;
-  final String count;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    final iconSize = compact ? 34.0 : 44.0;
-
-    return Container(
-      height: compact ? 96 : 112,
-      padding: EdgeInsets.symmetric(
-        horizontal: compact ? 9 : 12,
-        vertical: compact ? 10 : 12,
-      ),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.13),
-            blurRadius: 10,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: const Color(0xFF2BA6A3), size: iconSize),
-          SizedBox(width: compact ? 7 : 10),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: const Color(0xFF121926),
-                    fontSize: compact ? 11 : 14,
-                    height: 1.1,
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  count,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: const Color(0xFF121926),
-                    fontSize: compact ? 13 : 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Icon(
-            Icons.chevron_right_rounded,
-            color: const Color(0xFF121926),
-            size: compact ? 20 : 24,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _PageEntrance extends StatelessWidget {
   const _PageEntrance({
     required this.animation,
@@ -899,14 +810,22 @@ class _PageEntrance extends StatelessWidget {
 }
 
 class _BookTile extends StatelessWidget {
-  const _BookTile({required this.book});
+  const _BookTile({required this.book, required this.isFavorite});
 
   final _BookListItem book;
+  final bool isFavorite;
 
   @override
   Widget build(BuildContext context) {
     return _AniyomiTapResponse(
-      onTap: () => _showBookDetails(context, book),
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => StudentBookDetailsPage(book: book.details),
+          ),
+        );
+      },
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -944,35 +863,23 @@ class _BookTile extends StatelessWidget {
                       ),
                     ),
                     Positioned(
-                      left: 10,
-                      right: 10,
-                      bottom: 11,
-                      child: Text(
-                        book.title,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w800,
-                          color: Colors.white,
-                          height: 1.12,
-                        ),
-                      ),
-                    ),
-                    Positioned(
                       top: 9,
                       right: 9,
-                      child: Container(
-                        width: 26,
-                        height: 26,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        width: 28,
+                        height: 28,
                         decoration: BoxDecoration(
                           color: Colors.black.withValues(alpha: 0.50),
                           borderRadius: BorderRadius.circular(999),
                         ),
-                        child: const Icon(
-                          Icons.bookmark_border_rounded,
+                        child: Icon(
+                          isFavorite
+                              ? Icons.star_rounded
+                              : Icons.star_border_rounded,
                           color: Colors.white,
-                          size: 16,
+                          size: 17,
                         ),
                       ),
                     ),
@@ -1061,26 +968,27 @@ class _BookListItem {
     required this.isbn,
     required this.coverUrl,
     required this.pdfUrl,
+    required this.createdAtMillis,
+    required this.details,
   });
 
   factory _BookListItem.fromDoc(
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data();
+    final details = StudentBookDetailsData.fromMap(id: doc.id, data: data);
     return _BookListItem(
       id: doc.id,
-      title: _stringValue(data['title'], fallback: 'Untitled Book'),
-      author: _stringValue(data['author'], fallback: 'Unknown author'),
-      description: _stringValue(data['description'], fallback: ''),
-      isbn: _stringValue(data['isbn'], fallback: ''),
-      coverUrl: _stringValue(
-        data['cover_url'],
-        fallback: _stringValue(data['coverUrl'], fallback: ''),
+      title: details.title,
+      author: details.author,
+      description: details.summary,
+      isbn: details.isbn,
+      coverUrl: details.coverUrl,
+      pdfUrl: details.pdfUrl,
+      createdAtMillis: _timestampMillis(
+        data['created_at'] ?? data['createdAt'],
       ),
-      pdfUrl: _stringValue(
-        data['pdf_url'],
-        fallback: _stringValue(data['pdfUrl'], fallback: ''),
-      ),
+      details: details,
     );
   }
 
@@ -1091,12 +999,14 @@ class _BookListItem {
   final String isbn;
   final String coverUrl;
   final String pdfUrl;
+  final int createdAtMillis;
+  final StudentBookDetailsData details;
 
-  static String _stringValue(Object? value, {required String fallback}) {
-    if (value is String && value.trim().isNotEmpty) {
-      return value.trim();
+  static int _timestampMillis(Object? value) {
+    if (value is Timestamp) {
+      return value.millisecondsSinceEpoch;
     }
-    return fallback;
+    return 0;
   }
 }
 
@@ -1127,124 +1037,5 @@ class _BookListMessage extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-void _showBookDetails(BuildContext context, _BookListItem book) {
-  showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: Colors.white,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
-    builder: (context) {
-      return SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 18, 22, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                    width: 92,
-                    child: AspectRatio(
-                      aspectRatio: 0.68,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(10),
-                        child: _BookCover(book: book),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          book.title,
-                          style: const TextStyle(
-                            color: Color(0xFF121926),
-                            fontSize: 18,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        const SizedBox(height: 5),
-                        Text(
-                          book.author,
-                          style: const TextStyle(
-                            color: Color(0xFF737B8C),
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        if (book.isbn.isNotEmpty) ...[
-                          const SizedBox(height: 7),
-                          Text(
-                            'ISBN ${book.isbn}',
-                            style: const TextStyle(
-                              color: Color(0xFFA0A8B9),
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              if (book.description.isNotEmpty) ...[
-                const SizedBox(height: 18),
-                Text(
-                  book.description,
-                  style: const TextStyle(
-                    color: Color(0xFF394150),
-                    height: 1.35,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 22),
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: ElevatedButton.icon(
-                  onPressed: book.pdfUrl.isEmpty
-                      ? null
-                      : () => _openPdf(context, book.pdfUrl),
-                  icon: const Icon(Icons.picture_as_pdf_outlined),
-                  label: const Text('Read PDF'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF3C13C5),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    },
-  );
-}
-
-Future<void> _openPdf(BuildContext context, String pdfUrl) async {
-  final uri = Uri.tryParse(pdfUrl);
-  if (uri == null) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Invalid PDF link.')));
-    return;
-  }
-
-  final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-  if (!opened && context.mounted) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Could not open PDF.')));
   }
 }

@@ -7,15 +7,18 @@ import 'package:image_picker/image_picker.dart';
 import 'package:libretrack/pages/login_page.dart';
 import 'package:libretrack/services/storage_service.dart';
 
-class ProfilePage extends StatelessWidget {
-  const ProfilePage({super.key});
+class LibrarianProfilePage extends StatelessWidget {
+  const LibrarianProfilePage({super.key});
 
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
 
     if (user == null) {
-      return const _SignedOutProfile();
+      return const Scaffold(
+        backgroundColor: Color(0xFFE3E7EB),
+        body: Center(child: Text('Please log in to view your profile.')),
+      );
     }
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -24,7 +27,7 @@ class ProfilePage extends StatelessWidget {
           .doc(user.uid)
           .snapshots(),
       builder: (context, snapshot) {
-        final profile = StudentProfile.fromFirebase(
+        final profile = LibrarianProfile.fromFirebase(
           user: user,
           data: snapshot.data?.data(),
         );
@@ -32,9 +35,7 @@ class ProfilePage extends StatelessWidget {
         return Scaffold(
           backgroundColor: const Color(0xFFE3E7EB),
           body: RefreshIndicator(
-            onRefresh: () async {
-              await user.reload();
-            },
+            onRefresh: () async => user.reload(),
             child: SafeArea(
               child: ListView(
                 physics: const AlwaysScrollableScrollPhysics(
@@ -50,8 +51,8 @@ class ProfilePage extends StatelessWidget {
                     children: [
                       _InfoRow(
                         icon: Icons.badge_outlined,
-                        label: 'Student ID',
-                        value: profile.schoolId,
+                        label: 'Librarian ID',
+                        value: profile.staffId,
                       ),
                       _InfoRow(
                         icon: Icons.mail_outline_rounded,
@@ -74,7 +75,8 @@ class ProfilePage extends StatelessWidget {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => ProfileSettingsPage(profile: profile),
+                          builder: (_) =>
+                              LibrarianProfileSettingsPage(profile: profile),
                         ),
                       );
                     },
@@ -113,19 +115,21 @@ class ProfilePage extends StatelessWidget {
   }
 }
 
-class ProfileSettingsPage extends StatefulWidget {
-  const ProfileSettingsPage({super.key, required this.profile});
+class LibrarianProfileSettingsPage extends StatefulWidget {
+  const LibrarianProfileSettingsPage({super.key, required this.profile});
 
-  final StudentProfile profile;
+  final LibrarianProfile profile;
 
   @override
-  State<ProfileSettingsPage> createState() => _ProfileSettingsPageState();
+  State<LibrarianProfileSettingsPage> createState() =>
+      _LibrarianProfileSettingsPageState();
 }
 
-class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
+class _LibrarianProfileSettingsPageState
+    extends State<LibrarianProfileSettingsPage> {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
-  final _schoolIdController = TextEditingController();
+  final _staffIdController = TextEditingController();
   final _imagePicker = ImagePicker();
   final _storageService = StorageService();
 
@@ -136,13 +140,15 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
   void initState() {
     super.initState();
     _nameController.text = widget.profile.name;
-    _schoolIdController.text = widget.profile.schoolId;
+    _staffIdController.text = widget.profile.staffId == 'Not set'
+        ? ''
+        : widget.profile.staffId;
   }
 
   @override
   void dispose() {
     _nameController.dispose();
-    _schoolIdController.dispose();
+    _staffIdController.dispose();
     super.dispose();
   }
 
@@ -178,7 +184,7 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
       }
 
       final name = _nameController.text.trim();
-      final schoolId = _schoolIdController.text.trim();
+      final staffId = _staffIdController.text.trim();
 
       await user.updateDisplayName(name);
       if (_selectedImage != null && photoUrl.isNotEmpty) {
@@ -188,11 +194,12 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
       await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
         'uid': user.uid,
         'name': name,
-        'schoolId': schoolId,
-        'email': widget.profile.email,
         'displayName': name,
-        'role': widget.profile.role.toLowerCase(),
-        'accountType': widget.profile.role.toLowerCase(),
+        'schoolId': staffId,
+        'staffId': staffId,
+        'email': widget.profile.email,
+        'role': 'librarian',
+        'accountType': 'librarian',
         'photoUrl': photoUrl,
         'profileImageUrl': photoUrl,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -264,12 +271,12 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
                         ),
                         const SizedBox(height: 14),
                         _SettingsField(
-                          controller: _schoolIdController,
-                          label: 'Student ID',
+                          controller: _staffIdController,
+                          label: 'Librarian ID',
                           icon: Icons.badge_outlined,
                           validator: (value) {
                             if (value == null || value.trim().isEmpty) {
-                              return 'Please enter your student ID.';
+                              return 'Please enter your librarian ID.';
                             }
                             return null;
                           },
@@ -332,11 +339,11 @@ class _ProfileSettingsPageState extends State<ProfileSettingsPage> {
   }
 }
 
-class StudentProfile {
-  const StudentProfile({
+class LibrarianProfile {
+  const LibrarianProfile({
     required this.uid,
     required this.name,
-    required this.schoolId,
+    required this.staffId,
     required this.email,
     required this.role,
     required this.photoUrl,
@@ -344,24 +351,27 @@ class StudentProfile {
 
   final String uid;
   final String name;
-  final String schoolId;
+  final String staffId;
   final String email;
   final String role;
   final String photoUrl;
 
-  factory StudentProfile.fromFirebase({
+  factory LibrarianProfile.fromFirebase({
     required User user,
     required Map<String, dynamic>? data,
   }) {
-    return StudentProfile(
+    return LibrarianProfile(
       uid: user.uid,
       name: _stringValue(
         data?['name'],
-        fallback: user.displayName ?? 'Student',
+        fallback: user.displayName ?? 'Librarian',
       ),
-      schoolId: _stringValue(data?['schoolId'], fallback: 'Not set'),
+      staffId: _stringValue(
+        data?['staffId'] ?? data?['schoolId'],
+        fallback: 'Not set',
+      ),
       email: _stringValue(data?['email'], fallback: user.email ?? 'No email'),
-      role: _formatRole(_stringValue(data?['role'], fallback: 'student')),
+      role: _formatRole(_stringValue(data?['role'], fallback: 'librarian')),
       photoUrl: _stringValue(
         data?['photoUrl'],
         fallback: _stringValue(
@@ -371,30 +381,18 @@ class StudentProfile {
       ),
     );
   }
-
-  static String _stringValue(Object? value, {required String fallback}) {
-    if (value is String && value.trim().isNotEmpty) {
-      return value.trim();
-    }
-    return fallback;
-  }
-
-  static String _formatRole(String role) {
-    if (role.isEmpty) return 'Student';
-    return role[0].toUpperCase() + role.substring(1).toLowerCase();
-  }
 }
 
-class _SignedOutProfile extends StatelessWidget {
-  const _SignedOutProfile();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: Color(0xFFE3E7EB),
-      body: Center(child: Text('Please log in to view your profile.')),
-    );
+String _stringValue(Object? value, {required String fallback}) {
+  if (value is String && value.trim().isNotEmpty) {
+    return value.trim();
   }
+  return fallback;
+}
+
+String _formatRole(String role) {
+  if (role.isEmpty) return 'Librarian';
+  return role[0].toUpperCase() + role.substring(1).toLowerCase();
 }
 
 class _ProfileTopBar extends StatelessWidget {
@@ -432,7 +430,7 @@ class _ProfileTopBar extends StatelessWidget {
 class _ProfileHeader extends StatelessWidget {
   const _ProfileHeader({required this.profile});
 
-  final StudentProfile profile;
+  final LibrarianProfile profile;
 
   @override
   Widget build(BuildContext context) {
@@ -465,7 +463,7 @@ class _ProfileHeader extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            profile.schoolId,
+            profile.staffId,
             style: const TextStyle(
               fontSize: 14,
               color: Color(0xFF5A5862),
@@ -504,7 +502,7 @@ class _ProfileAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? 'S' : name.trim()[0].toUpperCase();
+    final initial = name.trim().isEmpty ? 'L' : name.trim()[0].toUpperCase();
 
     return CircleAvatar(
       radius: 48,
@@ -539,7 +537,7 @@ class _EditableAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final initial = name.trim().isEmpty ? 'S' : name.trim()[0].toUpperCase();
+    final initial = name.trim().isEmpty ? 'L' : name.trim()[0].toUpperCase();
 
     ImageProvider? image;
     if (imageFile != null) {
