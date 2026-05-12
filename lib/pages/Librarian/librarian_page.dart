@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:libretrack/pages/Librarian/librarian_books_tab.dart';
 import 'package:libretrack/pages/Librarian/librarian_profile_page.dart';
@@ -14,6 +15,151 @@ class LibrarianPage extends StatefulWidget {
 
 class _LibrarianPageState extends State<LibrarianPage> {
   int _navIndex = 0;
+
+  // ── FCM / notification state ──────────────────────────────────────────────
+  final List<_AppNotification> _notifications = [];
+  bool _hasUnread = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initFcm();
+    _listenForOverdueNotifications();
+    _listenForNewBorrows();
+  }
+
+  Future<void> _initFcm() async {
+    final messaging = FirebaseMessaging.instance;
+    await messaging.requestPermission(alert: true, badge: true, sound: true);
+
+    // Handle foreground messages
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      final title = message.notification?.title ?? 'Notification';
+      final body = message.notification?.body ?? '';
+      if (mounted) {
+        setState(() {
+          _notifications.insert(
+            0,
+            _AppNotification(
+              title: title,
+              body: body,
+              time: DateTime.now(),
+              type: _NotificationType.general,
+            ),
+          );
+          _hasUnread = true;
+        });
+      }
+    });
+  }
+
+  /// Watch active borrow_records and fire an in-app notification when a new
+  /// borrow appears (i.e. a student just borrowed a book).
+  void _listenForNewBorrows() {
+    FirebaseFirestore.instance
+        .collection('borrow_records')
+        .where('status', whereIn: ['active', 'borrowed'])
+        .snapshots()
+        .listen((snap) {
+          for (final change in snap.docChanges) {
+            if (change.type == DocumentChangeType.added) {
+              final data = change.doc.data()!;
+              final borrower = _stringValue(
+                data['borrowerName'] ?? data['studentName'] ?? data['name'],
+                fallback: 'A student',
+              );
+              final book = _stringValue(
+                data['bookTitle'] ?? data['title'],
+                fallback: 'a book',
+              );
+              if (mounted) {
+                setState(() {
+                  _notifications.insert(
+                    0,
+                    _AppNotification(
+                      title: 'New Borrow',
+                      body: '$borrower borrowed "$book"',
+                      time: DateTime.now(),
+                      type: _NotificationType.newBorrow,
+                    ),
+                  );
+                  _hasUnread = true;
+                });
+              }
+            }
+          }
+        });
+  }
+
+  /// Watch active records and flag any that are overdue (past due date).
+  void _listenForOverdueNotifications() {
+    FirebaseFirestore.instance
+        .collection('borrow_records')
+        .where('status', whereIn: ['active', 'borrowed'])
+        .snapshots()
+        .listen((snap) {
+          final now = DateTime.now();
+          for (final doc in snap.docs) {
+            final data = doc.data();
+
+            // Read the due date the librarian explicitly set during scan.
+            // scan_page.dart writes both 'dueDate' and 'due_date'.
+            // Fall back to borrowedAt + 7 days only for legacy records that
+            // pre-date the due-date field (i.e. neither field is present).
+            final dueDateMillis = _timestampMillis(
+              data['dueDate'] ?? data['due_date'],
+            );
+            final effectiveDueMillis = dueDateMillis != 0
+                ? dueDateMillis
+                : _fallbackDueMillis(data);
+
+            if (effectiveDueMillis == 0) continue;
+            final dueDate = DateTime.fromMillisecondsSinceEpoch(
+              effectiveDueMillis,
+            );
+            if (now.isAfter(dueDate)) {
+              final borrower = _stringValue(
+                data['borrowerName'] ?? data['studentName'] ?? data['name'],
+                fallback: 'A student',
+              );
+              final book = _stringValue(
+                data['bookTitle'] ?? data['title'],
+                fallback: 'a book',
+              );
+              // Avoid duplicate overdue notifications per record
+              final alreadyAdded = _notifications.any(
+                (n) =>
+                    n.type == _NotificationType.overdue && n.recordId == doc.id,
+              );
+              if (!alreadyAdded && mounted) {
+                setState(() {
+                  _notifications.insert(
+                    0,
+                    _AppNotification(
+                      title: 'Overdue Book',
+                      body: '$borrower has not returned "$book" — overdue!',
+                      time: DateTime.now(),
+                      type: _NotificationType.overdue,
+                      recordId: doc.id,
+                    ),
+                  );
+                  _hasUnread = true;
+                });
+              }
+            }
+          }
+        });
+  }
+
+  void _openNotificationPanel() {
+    setState(() => _hasUnread = false);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _NotificationSheet(notifications: _notifications),
+    );
+  }
 
   Stream<int> _bookCountStream() {
     return FirebaseFirestore.instance
@@ -169,7 +315,12 @@ class _LibrarianPageState extends State<LibrarianPage> {
     final user = FirebaseAuth.instance.currentUser;
 
     if (user == null) {
-      return _LibrarianHeaderContent(name: 'Librarian', photoUrl: '');
+      return _LibrarianHeaderContent(
+        name: 'Librarian',
+        photoUrl: '',
+        hasUnread: _hasUnread,
+        onNotificationTap: _openNotificationPanel,
+      );
     }
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -193,7 +344,12 @@ class _LibrarianPageState extends State<LibrarianPage> {
           ),
         );
 
-        return _LibrarianHeaderContent(name: name, photoUrl: photoUrl);
+        return _LibrarianHeaderContent(
+          name: name,
+          photoUrl: photoUrl,
+          hasUnread: _hasUnread,
+          onNotificationTap: _openNotificationPanel,
+        );
       },
     );
   }
@@ -516,10 +672,17 @@ class _LibrarianPageState extends State<LibrarianPage> {
 }
 
 class _LibrarianHeaderContent extends StatelessWidget {
-  const _LibrarianHeaderContent({required this.name, required this.photoUrl});
+  const _LibrarianHeaderContent({
+    required this.name,
+    required this.photoUrl,
+    required this.hasUnread,
+    required this.onNotificationTap,
+  });
 
   final String name;
   final String photoUrl;
+  final bool hasUnread;
+  final VoidCallback onNotificationTap;
 
   @override
   Widget build(BuildContext context) {
@@ -555,6 +718,48 @@ class _LibrarianHeaderContent extends StatelessWidget {
                   letterSpacing: 0,
                 ),
               ),
+            ],
+          ),
+        ),
+        // ── Notification bell ──────────────────────────────────────────────
+        GestureDetector(
+          onTap: onNotificationTap,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.10),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.notifications_rounded,
+                  color: Color(0xFF2BA6A3),
+                  size: 22,
+                ),
+              ),
+              if (hasUnread)
+                Positioned(
+                  top: 5,
+                  right: 5,
+                  child: Container(
+                    width: 10,
+                    height: 10,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFE43C44),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -1976,6 +2181,23 @@ class _BorrowerDetailSheetState extends State<_BorrowerDetailSheet> {
                         const SizedBox(height: 14),
                         const Divider(height: 1, color: Color(0xFFE4E7EC)),
                         const SizedBox(height: 14),
+                        // ── Due Date ──────────────────────────────────────
+                        _DateInfoRow(
+                          icon: Icons.event_rounded,
+                          label: 'Due Date',
+                          value: record.dueDateMillis == 0
+                              ? 'N/A'
+                              : _formatDateTime(record.dueDateMillis),
+                          valueColor: record.isOverdue
+                              ? const Color(0xFFE43C44)
+                              : const Color(0xFF2BA6A3),
+                          trailingBadge: record.isOverdue && !record.isReturned
+                              ? 'OVERDUE'
+                              : null,
+                        ),
+                        const SizedBox(height: 14),
+                        const Divider(height: 1, color: Color(0xFFE4E7EC)),
+                        const SizedBox(height: 14),
                         _DateInfoRow(
                           icon: Icons.logout_rounded,
                           label: 'Returned On',
@@ -2231,12 +2453,14 @@ class _DateInfoRow extends StatelessWidget {
     required this.label,
     required this.value,
     this.valueColor = const Color(0xFF11121A),
+    this.trailingBadge,
   });
 
   final IconData icon;
   final String label;
   final String value;
   final Color valueColor;
+  final String? trailingBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -2266,14 +2490,42 @@ class _DateInfoRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 2),
-              Text(
-                value,
-                style: TextStyle(
-                  color: valueColor,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      value,
+                      style: TextStyle(
+                        color: valueColor,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0,
+                      ),
+                    ),
+                  ),
+                  if (trailingBadge != null) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE43C44).withValues(alpha: 0.13),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        trailingBadge!,
+                        style: const TextStyle(
+                          color: Color(0xFFE43C44),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ],
           ),
@@ -2354,6 +2606,16 @@ class _BorrowerRecord {
   final String recordId;
 
   bool get isReturned => status == 'returned' || status == 'return';
+
+  /// Due date = borrowedAt + 7 days (default loan period).
+  int get dueDateMillis => borrowedAtMillis == 0
+      ? 0
+      : borrowedAtMillis + const Duration(days: 7).inMilliseconds;
+
+  bool get isOverdue {
+    if (isReturned || dueDateMillis == 0) return false;
+    return DateTime.now().millisecondsSinceEpoch > dueDateMillis;
+  }
 
   String get statusLabel => isReturned ? 'Returned' : 'Borrowed';
 
@@ -2572,4 +2834,235 @@ int _timestampMillis(Object? value) {
     return value.millisecondsSinceEpoch;
   }
   return 0;
+}
+
+/// Fallback due date for legacy borrow records that were created before the
+/// explicit dueDate field existed. Returns borrowedAt + 7 days, or 0 if the
+/// borrow timestamp is also missing.
+int _fallbackDueMillis(Map<String, dynamic> data) {
+  final borrowedMillis = _timestampMillis(
+    data['borrowed_at'] ??
+        data['borrowedAt'] ??
+        data['scanned_at'] ??
+        data['scannedAt'] ??
+        data['created_at'] ??
+        data['createdAt'],
+  );
+  if (borrowedMillis == 0) return 0;
+  return borrowedMillis + const Duration(days: 7).inMilliseconds;
+}
+
+// ─── Notification Model ──────────────────────────────────────────────────────
+
+enum _NotificationType { newBorrow, overdue, general }
+
+class _AppNotification {
+  const _AppNotification({
+    required this.title,
+    required this.body,
+    required this.time,
+    required this.type,
+    this.recordId,
+  });
+
+  final String title;
+  final String body;
+  final DateTime time;
+  final _NotificationType type;
+  final String? recordId;
+}
+
+// ─── Notification Bottom Sheet ───────────────────────────────────────────────
+
+class _NotificationSheet extends StatelessWidget {
+  const _NotificationSheet({required this.notifications});
+
+  final List<_AppNotification> notifications;
+
+  String _timeAgo(DateTime time) {
+    final diff = DateTime.now().difference(time);
+    if (diff.inSeconds < 60) return 'Just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
+
+  IconData _iconFor(_NotificationType type) {
+    switch (type) {
+      case _NotificationType.overdue:
+        return Icons.warning_amber_rounded;
+      case _NotificationType.newBorrow:
+        return Icons.bookmark_added_rounded;
+      case _NotificationType.general:
+        return Icons.notifications_rounded;
+    }
+  }
+
+  Color _colorFor(_NotificationType type) {
+    switch (type) {
+      case _NotificationType.overdue:
+        return const Color(0xFFE43C44);
+      case _NotificationType.newBorrow:
+        return const Color(0xFF2BA6A3);
+      case _NotificationType.general:
+        return const Color(0xFF4B23C6);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.65,
+      minChildSize: 0.35,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, controller) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFFF7F8FA),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: Column(
+          children: [
+            // drag handle
+            Container(
+              margin: const EdgeInsets.only(top: 12, bottom: 4),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: const Color(0xFFD0D5DD),
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+            // title bar
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+              child: Row(
+                children: [
+                  const Text(
+                    'Notifications',
+                    style: TextStyle(
+                      color: Color(0xFF121926),
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Color(0xFF565B66),
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: notifications.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.notifications_none_rounded,
+                            size: 48,
+                            color: Color(0xFFABB6C2),
+                          ),
+                          SizedBox(height: 12),
+                          Text(
+                            'No notifications yet',
+                            style: TextStyle(
+                              color: Color(0xFF8A93A2),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: controller,
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+                      itemCount: notifications.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final n = notifications[index];
+                        final color = _colorFor(n.type);
+                        return Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.07),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Icon(
+                                  _iconFor(n.type),
+                                  size: 20,
+                                  color: color,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      n.title,
+                                      style: const TextStyle(
+                                        color: Color(0xFF11121A),
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 0,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      n.body,
+                                      style: const TextStyle(
+                                        color: Color(0xFF565B66),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        letterSpacing: 0,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      _timeAgo(n.time),
+                                      style: const TextStyle(
+                                        color: Color(0xFFABB6C2),
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

@@ -342,6 +342,72 @@ class _HomePageState extends State<HomePage> {
     return StudentLibraryService.libraryEntriesStream(user.uid);
   }
 
+  /// Fetch categories from student's borrowed books to personalize recommendations
+  Future<Set<String>> _getBorrowedCategories() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return {};
+
+    try {
+      final borrowRecords = await FirebaseFirestore.instance
+          .collection('borrow_records')
+          .where('studentUid', isEqualTo: user.uid)
+          .where('status', isEqualTo: 'active')
+          .limit(20) // Get recent active borrows
+          .get();
+
+      final categories = <String>{};
+      for (final record in borrowRecords.docs) {
+        final data = record.data();
+        final category = data['category'] as String?;
+        if (category != null && category.isNotEmpty) {
+          categories.add(category);
+        }
+      }
+      return categories;
+    } catch (e) {
+      debugPrint('[Recommendations] Error fetching borrowed categories: $e');
+      return {};
+    }
+  }
+
+  /// Generate personalized recommendations based on borrowed book categories
+  List<HomeBook> _getPersonalizedRecommendations(
+    List<HomeBook> allBooks,
+    Set<String> borrowedCategories,
+  ) {
+    if (borrowedCategories.isEmpty) {
+      // Fallback: return books 6-10 if no borrow history
+      return allBooks.length > 5
+          ? allBooks.skip(5).take(5).toList()
+          : <HomeBook>[];
+    }
+
+    // Filter books by matching categories, exclude recently added
+    final recentlyAddedIds = allBooks.take(5).map((b) => b.id).toSet();
+    final recommendations = allBooks
+        .where(
+          (book) =>
+              !recentlyAddedIds.contains(book.id) &&
+              borrowedCategories.contains(book.details.category),
+        )
+        .take(5)
+        .toList();
+
+    // If not enough similar books, fill with other available books
+    if (recommendations.length < 5) {
+      final additionalBooks = allBooks
+          .where(
+            (book) =>
+                !recentlyAddedIds.contains(book.id) &&
+                !recommendations.any((r) => r.id == book.id),
+          )
+          .take(5 - recommendations.length);
+      recommendations.addAll(additionalBooks);
+    }
+
+    return recommendations;
+  }
+
   @override
   void dispose() {
     _bannerAutoScrollTimer?.cancel();
@@ -396,24 +462,50 @@ class _HomePageState extends State<HomePage> {
 
                 final books = snapshot.data ?? [];
                 final bannerBooks = books.take(5).toList();
+                final recentlyAdded = books.take(5).toList();
 
-                return StreamBuilder<Map<String, StudentBookLibraryEntry>>(
-                  stream: _libraryEntriesStream,
-                  builder: (context, librarySnapshot) {
-                    final libraryEntries = librarySnapshot.data ?? {};
+                return FutureBuilder<Set<String>>(
+                  future: _getBorrowedCategories(),
+                  builder: (context, categorySnapshot) {
+                    final borrowedCategories = categorySnapshot.data ?? {};
+                    final recommendations = _getPersonalizedRecommendations(
+                      books,
+                      borrowedCategories,
+                    );
 
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _buildBannerCarousel(bannerBooks),
-                        if (bannerBooks.isNotEmpty)
-                          _buildDots(bannerBooks.length),
-                        _buildSectionHeader(
-                          'Recently Added',
-                          showSeeAll: false,
-                        ),
-                        _buildBookRow(books, libraryEntries: libraryEntries),
-                      ],
+                    return StreamBuilder<Map<String, StudentBookLibraryEntry>>(
+                      stream: _libraryEntriesStream,
+                      builder: (context, librarySnapshot) {
+                        final libraryEntries = librarySnapshot.data ?? {};
+
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildBannerCarousel(bannerBooks),
+                            if (bannerBooks.isNotEmpty)
+                              _buildDots(bannerBooks.length),
+                            _buildSectionHeader(
+                              'Recently Added',
+                              showSeeAll: false,
+                            ),
+                            _buildBookRow(
+                              recentlyAdded,
+                              libraryEntries: libraryEntries,
+                            ),
+                            if (recommendations.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              _buildSectionHeader(
+                                'Recommendations For You',
+                                showSeeAll: false,
+                              ),
+                              _buildBookRow(
+                                recommendations,
+                                libraryEntries: libraryEntries,
+                              ),
+                            ],
+                          ],
+                        );
+                      },
                     );
                   },
                 );

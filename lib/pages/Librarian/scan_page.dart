@@ -139,6 +139,20 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
           throw Exception('This student already borrowed this book.');
         }
 
+        // Show confirm dialog — lets librarian review details and set due date.
+        if (!mounted) return;
+        final confirmed = await _showBorrowConfirmDialog(
+          book: book,
+          borrowerName: borrowerName,
+        );
+        if (confirmed == null) {
+          // Librarian cancelled — abort silently (no error snackbar).
+          setState(() => _isSavingScan = false);
+          return;
+        }
+
+        final dueDate = confirmed;
+
         final bookRef = FirebaseFirestore.instance
             .collection('books')
             .doc(book.id);
@@ -187,6 +201,8 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             'scanMode': 'borrow',
             'rawScan': rawCode,
             'librarianId': user?.uid ?? '',
+            'due_date': Timestamp.fromDate(dueDate),
+            'dueDate': Timestamp.fromDate(dueDate),
             'borrowed_at': FieldValue.serverTimestamp(),
             'borrowedAt': FieldValue.serverTimestamp(),
             'scanned_at': FieldValue.serverTimestamp(),
@@ -195,7 +211,7 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             'updatedAt': FieldValue.serverTimestamp(),
           });
         });
-        _showSnackBar('Borrow QR scanned successfully.');
+        _showSnackBar('Borrow confirmed. Due ${_formatDate(dueDate)}.');
       } else {
         final activeRecord = await _findActiveBorrowRecord(book, payload);
         if (activeRecord == null) {
@@ -458,6 +474,289 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
     });
 
     return active.first;
+  }
+
+  /// Shows a confirmation dialog before recording a borrow.
+  /// The librarian sees book + student details and can adjust the due date.
+  /// Returns the chosen [DateTime] on confirm, or null if cancelled.
+  Future<DateTime?> _showBorrowConfirmDialog({
+    required _ScannedBook book,
+    required String borrowerName,
+  }) async {
+    DateTime selectedDue = DateTime.now().add(const Duration(days: 14));
+
+    return showDialog<DateTime>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              titlePadding: const EdgeInsets.fromLTRB(22, 20, 22, 0),
+              contentPadding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
+              actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              title: const Row(
+                children: [
+                  Icon(
+                    Icons.add_task_rounded,
+                    color: Color(0xFF4B23C6),
+                    size: 22,
+                  ),
+                  SizedBox(width: 10),
+                  Text(
+                    'Confirm Borrow',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF11121A),
+                      letterSpacing: 0,
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 4),
+                  // Book info row
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(7),
+                        child: SizedBox(
+                          width: 46,
+                          height: 62,
+                          child: book.coverUrl.isNotEmpty
+                              ? Image.network(
+                                  book.coverUrl,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) =>
+                                      _ConfirmCoverFallback(title: book.title),
+                                )
+                              : _ConfirmCoverFallback(title: book.title),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              book.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF11121A),
+                                height: 1.2,
+                                letterSpacing: 0,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              book.author,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF6B7280),
+                                letterSpacing: 0,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  // Borrower row
+                  Row(
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF0EDFF),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(
+                          Icons.person_rounded,
+                          color: Color(0xFF4B23C6),
+                          size: 18,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Borrower',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Color(0xFF6B7280),
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            Text(
+                              borrowerName,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF11121A),
+                                letterSpacing: 0,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  // Due date row — tappable
+                  GestureDetector(
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: ctx,
+                        initialDate: selectedDue,
+                        firstDate: DateTime.now(),
+                        lastDate: DateTime.now().add(const Duration(days: 365)),
+                        builder: (ctx, child) => Theme(
+                          data: Theme.of(ctx).copyWith(
+                            colorScheme: const ColorScheme.light(
+                              primary: Color(0xFF4B23C6),
+                              onPrimary: Colors.white,
+                              surface: Colors.white,
+                            ),
+                          ),
+                          child: child!,
+                        ),
+                      );
+                      if (picked != null) {
+                        setDialogState(() => selectedDue = picked);
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 11,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F7FA),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFD7F4EF),
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            child: const Icon(
+                              Icons.calendar_today_rounded,
+                              color: Color(0xFF17817F),
+                              size: 16,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Due Date',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Color(0xFF6B7280),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                Text(
+                                  _formatDate(selectedDue),
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF11121A),
+                                    letterSpacing: 0,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(
+                            Icons.edit_calendar_rounded,
+                            color: Color(0xFF6B7280),
+                            size: 16,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, null),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF6B7280),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  child: const Text(
+                    'Cancel',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, selectedDue),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF4B23C6),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  child: const Text(
+                    'Confirm Borrow',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _formatDate(DateTime dt) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    return '${months[dt.month - 1]} ${dt.day}, ${dt.year}';
   }
 
   void _showSnackBar(String message, {bool isError = false}) {
@@ -1017,6 +1316,34 @@ class _RecentScanCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ConfirmCoverFallback extends StatelessWidget {
+  const _ConfirmCoverFallback({required this.title});
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    const palettes = [
+      [Color(0xFF1A237E), Color(0xFF2BA6A3)],
+      [Color(0xFF31473A), Color(0xFFE2A346)],
+      [Color(0xFF69353F), Color(0xFF4B8E8D)],
+      [Color(0xFF243B53), Color(0xFF9C6644)],
+    ];
+    final idx = title.codeUnits.fold<int>(0, (a, b) => a + b) % palettes.length;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: palettes[idx],
+        ),
+      ),
+      child: const Center(
+        child: Icon(Icons.menu_book_rounded, color: Colors.white, size: 18),
       ),
     );
   }

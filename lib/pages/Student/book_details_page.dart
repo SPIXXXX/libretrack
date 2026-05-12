@@ -237,7 +237,6 @@ class _StudentBookDetailsPageState extends State<StudentBookDetailsPage> {
             final hasBorrowed = snapshot.docs.any((doc) {
               final data = doc.data();
               final recordUid = data['studentUid'] as String?;
-              final recordStudentId = data['studentId'] as String?;
 
               // Check UID match - student must have borrowed with their Firebase UID
               final uidMatches =
@@ -610,53 +609,22 @@ class _StudentBookDetailsPageState extends State<StudentBookDetailsPage> {
           );
         }
 
+        // While student info is loading, show the button immediately using
+        // widget.book data (already passed from the list). Once the future
+        // resolves the streams take over and correct anything if needed.
         final student = studentSnapshot.data;
-        if (student == null) {
-          return const Padding(
-            padding: EdgeInsets.fromLTRB(12, 10, 12, 14),
-            child: SizedBox(
-              height: 56,
-              child: Center(
-                child: CircularProgressIndicator(color: Color(0xFF2BA6A3)),
-              ),
-            ),
-          );
-        }
 
-        // Listen to real-time borrow state for this student+book.
-        // BUG FIX: Use null as the initial value (not false) so we can
-        // distinguish "still loading" from "confirmed not borrowed".
-        // This prevents the button from briefly showing "Borrow" on a new
-        // account while Firestore hasn't responded yet, which caused the
-        // wrong state when availableCopies was already 0.
         return StreamBuilder<bool>(
-          stream: _borrowedStateStream(student),
+          stream: student == null
+              ? const Stream.empty()
+              : _borrowedStateStream(student),
+          initialData: false,
           builder: (context, borrowedSnapshot) {
             return StreamBuilder<StudentBookDetailsData>(
               stream: _bookStreamCached,
+              initialData: widget.book,
               builder: (context, bookSnapshot) {
-                // Both streams MUST have emitted at least one real value
-                // before we render anything interactive. While either stream
-                // is still loading, show a spinner. This prevents the stale
-                // widget.book (passed from the list page) from briefly
-                // enabling the Borrow button when copies are already 0.
-                final borrowedLoading = !borrowedSnapshot.hasData;
-                final bookLoading = !bookSnapshot.hasData;
-                if (borrowedLoading || bookLoading) {
-                  return const Padding(
-                    padding: EdgeInsets.fromLTRB(12, 10, 12, 14),
-                    child: SizedBox(
-                      height: 56,
-                      child: Center(
-                        child: CircularProgressIndicator(
-                          color: Color(0xFF2BA6A3),
-                        ),
-                      ),
-                    ),
-                  );
-                }
-
-                // Both streams have resolved — safe to use real values.
+                // initialData guarantees these are never null from the start.
                 final isBorrowed = borrowedSnapshot.data!;
                 final book = bookSnapshot.data!;
 
@@ -693,7 +661,7 @@ class _StudentBookDetailsPageState extends State<StudentBookDetailsPage> {
                       _BorrowActionButton(
                         label: label,
                         isDisabled: hasNoCopies && !isBorrowed,
-                        onPressed: canBorrow
+                        onPressed: (canBorrow && student != null)
                             ? () => _showBorrowQr(
                                 student: student,
                                 isReturn: isBorrowed,
@@ -750,13 +718,6 @@ class _StudentBookDetailsPageState extends State<StudentBookDetailsPage> {
         ),
       ],
     );
-  }
-
-  String? _optionalString(Object? value) {
-    if (value is String && value.trim().isNotEmpty) {
-      return value.trim();
-    }
-    return null;
   }
 
   Widget _buildBookOverview(BuildContext context) {

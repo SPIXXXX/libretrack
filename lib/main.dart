@@ -1,10 +1,18 @@
+import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'pages/login_page.dart';
 import 'pages/Librarian/librarian_page.dart';
 import 'pages/Student/home_page.dart';
+import 'services/fcm_background_handler.dart'; // ← NEW
+import 'services/fcm_navigation_service.dart'; // ← NEW
+
+// GlobalKey lives here so both main() and MyApp can share it
+final GlobalKey<NavigatorState> _navigatorKey =
+    GlobalKey<NavigatorState>(); // ← NEW
 
 void main() async {
   // Firebase setup starts here.
@@ -15,6 +23,37 @@ void main() async {
     // Connects the app to the Firebase project configured in Android/iOS/Web.
     // This must run before using FirebaseAuth or FirebaseFirestore anywhere.
     await Firebase.initializeApp();
+
+    // Handle FCM when app is fully terminated
+    FirebaseMessaging.onBackgroundMessage(
+      firebaseMessagingBackgroundHandler,
+    ); // ← NEW
+
+    // Handle notification taps (terminated + background states)
+    FcmNavigationService.init(_navigatorKey); // ← NEW
+
+    // Set up foreground message handler (non-blocking)
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      debugPrint('Got a message in foreground: ${message.notification?.title}');
+    });
+
+    // Request notification permission asynchronously (don't block startup)
+    unawaited(
+      Future.delayed(const Duration(milliseconds: 500), () async {
+        try {
+          await FirebaseMessaging.instance.requestPermission(
+            alert: true,
+            announcement: false,
+            badge: true,
+            criticalAlert: false,
+            provisional: false,
+            sound: true,
+          );
+        } catch (e) {
+          debugPrint('Notification permission request failed: $e');
+        }
+      }),
+    );
 
     runApp(const MyApp());
   } catch (error, stackTrace) {
@@ -40,6 +79,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'LibraTrack',
       theme: ThemeData(useMaterial3: false),
+      navigatorKey: _navigatorKey, // ← NEW: wires the key into the navigator
       home: home ?? const AuthGate(),
       debugShowCheckedModeBanner: false,
     );
