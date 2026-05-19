@@ -6,6 +6,7 @@ import 'package:libretrack/pages/Student/book_details_page.dart';
 import 'package:libretrack/pages/Student/book_list_page.dart';
 import 'package:libretrack/pages/Student/explore_page.dart';
 import 'package:libretrack/pages/Student/profile_page.dart';
+import 'package:libretrack/services/notification_service.dart';
 import 'package:libretrack/services/student_library_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -21,6 +22,12 @@ class StudentPage extends StatefulWidget {
 
 class _StudentPageState extends State<StudentPage> {
   int _navIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(NotificationService.registerCurrentDevice(role: 'student'));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -294,6 +301,109 @@ class HomeBook {
   }
 }
 
+class _StudentBorrowStats {
+  const _StudentBorrowStats({this.currentlyBorrowed = 0, this.returned = 0});
+
+  final int currentlyBorrowed;
+  final int returned;
+}
+
+class _StudentBorrowRecord {
+  const _StudentBorrowRecord({
+    required this.recordId,
+    required this.bookId,
+    required this.bookTitle,
+    required this.author,
+    required this.coverUrl,
+    required this.status,
+    required this.borrowedAtMillis,
+    required this.dueDateMillis,
+    required this.returnedAtMillis,
+  });
+
+  final String recordId;
+  final String bookId;
+  final String bookTitle;
+  final String author;
+  final String coverUrl;
+  final String status;
+  final int borrowedAtMillis;
+  final int dueDateMillis;
+  final int returnedAtMillis;
+
+  bool get isReturned => status == 'returned' || status == 'return';
+
+  bool get isCurrentlyBorrowed => status == 'active' || status == 'borrowed';
+
+  bool get isOverdue {
+    if (isReturned || dueDateMillis == 0) return false;
+    return DateTime.now().millisecondsSinceEpoch > dueDateMillis;
+  }
+
+  String get statusLabel => isReturned ? 'Returned' : 'Borrowed';
+
+  Color get statusColor =>
+      isReturned ? const Color(0xFF4B23C6) : const Color(0xFF19A7A1);
+
+  factory _StudentBorrowRecord.fromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    final borrowedAtMillis = _timestampMillis(
+      data['borrowed_at'] ??
+          data['borrowedAt'] ??
+          data['scanned_at'] ??
+          data['scannedAt'] ??
+          data['created_at'] ??
+          data['createdAt'],
+    );
+    final explicitDueMillis = _timestampMillis(
+      data['dueDate'] ?? data['due_date'],
+    );
+
+    return _StudentBorrowRecord(
+      recordId: doc.id,
+      bookId: _stringValue(data['bookId'] ?? data['book_id'], fallback: ''),
+      bookTitle: _stringValue(
+        data['bookTitle'] ?? data['title'],
+        fallback: 'Untitled Book',
+      ),
+      author: _stringValue(data['author'], fallback: 'Unknown author'),
+      coverUrl: _stringValue(
+        data['cover_url'] ?? data['coverUrl'],
+        fallback: '',
+      ),
+      status: _stringValue(data['status'], fallback: 'borrowed').toLowerCase(),
+      borrowedAtMillis: borrowedAtMillis,
+      dueDateMillis: explicitDueMillis != 0
+          ? explicitDueMillis
+          : borrowedAtMillis == 0
+          ? 0
+          : borrowedAtMillis + const Duration(days: 7).inMilliseconds,
+      returnedAtMillis: _timestampMillis(
+        data['returned_at'] ?? data['returnedAt'] ?? data['returnDate'],
+      ),
+    );
+  }
+
+  static String _stringValue(Object? value, {required String fallback}) {
+    if (value is String && value.trim().isNotEmpty) {
+      return value.trim();
+    }
+    if (value is num) {
+      return value.toString();
+    }
+    return fallback;
+  }
+
+  static int _timestampMillis(Object? value) {
+    if (value is Timestamp) {
+      return value.millisecondsSinceEpoch;
+    }
+    return 0;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // HOME PAGE
 // ---------------------------------------------------------------------------
@@ -313,7 +423,16 @@ class _HomePageState extends State<HomePage> {
   late final Stream<List<HomeBook>> _booksStream = _bookStream();
   late final Stream<Map<String, StudentBookLibraryEntry>>
   _libraryEntriesStream = _libraryStream();
+  late final Stream<_StudentBorrowStats> _studentBorrowStatsStream =
+      _borrowStatsStream();
+  late final Stream<List<AppNotification>> _notificationsStream =
+      NotificationService.notificationsStream(role: 'student');
   Timer? _bannerAutoScrollTimer;
+  Timer? _dueNotificationTimer;
+  List<AppNotification> _notifications = [];
+  int _unreadNotificationCount = 0;
+  StreamSubscription<List<AppNotification>>? _notificationSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _overdueSubscription;
 
   @override
   void initState() {
@@ -321,6 +440,9 @@ class _HomePageState extends State<HomePage> {
     final user = FirebaseAuth.instance.currentUser;
     if (user != null) {
       StudentLibraryService.ensureDefaultCategory(user.uid);
+      _listenForStudentNotifications();
+      _listenForStudentDueNotifications(user.uid);
+      _scheduleStudentDueNotificationChecks(user.uid);
     }
   }
 
@@ -340,6 +462,73 @@ class _HomePageState extends State<HomePage> {
       return Stream<Map<String, StudentBookLibraryEntry>>.value({});
     }
     return StudentLibraryService.libraryEntriesStream(user.uid);
+  }
+
+  Stream<_StudentBorrowStats> _borrowStatsStream() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return Stream<_StudentBorrowStats>.value(const _StudentBorrowStats());
+    }
+
+    return FirebaseFirestore.instance
+        .collection('borrow_records')
+        .where('studentUid', isEqualTo: user.uid)
+        .snapshots()
+        .map((snapshot) {
+          var currentlyBorrowed = 0;
+          var returned = 0;
+          for (final doc in snapshot.docs) {
+            final status = _profileValue(
+              doc.data()['status'],
+              fallback: '',
+            ).toLowerCase();
+            if (status == 'active' || status == 'borrowed') {
+              currentlyBorrowed++;
+            } else if (status == 'returned' || status == 'return') {
+              returned++;
+            }
+          }
+
+          return _StudentBorrowStats(
+            currentlyBorrowed: currentlyBorrowed,
+            returned: returned,
+          );
+        });
+  }
+
+  Stream<List<_StudentBorrowRecord>> _studentBorrowRecordsStream({
+    required bool returned,
+  }) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return Stream<List<_StudentBorrowRecord>>.value(
+        const <_StudentBorrowRecord>[],
+      );
+    }
+
+    return FirebaseFirestore.instance
+        .collection('borrow_records')
+        .where('studentUid', isEqualTo: user.uid)
+        .snapshots()
+        .map((snapshot) {
+          final records = snapshot.docs
+              .map(_StudentBorrowRecord.fromDoc)
+              .where(
+                (record) =>
+                    returned ? record.isReturned : record.isCurrentlyBorrowed,
+              )
+              .toList();
+          records.sort((a, b) {
+            final aTime = returned && a.returnedAtMillis != 0
+                ? a.returnedAtMillis
+                : a.borrowedAtMillis;
+            final bTime = returned && b.returnedAtMillis != 0
+                ? b.returnedAtMillis
+                : b.borrowedAtMillis;
+            return bTime.compareTo(aTime);
+          });
+          return records;
+        });
   }
 
   /// Fetch categories from student's borrowed books to personalize recommendations
@@ -411,6 +600,9 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _bannerAutoScrollTimer?.cancel();
+    _dueNotificationTimer?.cancel();
+    unawaited(_notificationSubscription?.cancel());
+    unawaited(_overdueSubscription?.cancel());
     _pageController.dispose();
     super.dispose();
   }
@@ -484,6 +676,7 @@ class _HomePageState extends State<HomePage> {
                             _buildBannerCarousel(bannerBooks),
                             if (bannerBooks.isNotEmpty)
                               _buildDots(bannerBooks.length),
+                            _buildBorrowStatsCards(),
                             _buildSectionHeader(
                               'Recently Added',
                               showSeeAll: false,
@@ -522,6 +715,57 @@ class _HomePageState extends State<HomePage> {
   // HEADER
   // ---------------------------------------------------------------------------
 
+  Widget _buildBorrowStatsCards() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 18),
+      child: StreamBuilder<_StudentBorrowStats>(
+        stream: _studentBorrowStatsStream,
+        builder: (context, snapshot) {
+          final stats = snapshot.data ?? const _StudentBorrowStats();
+
+          return Row(
+            children: [
+              Expanded(
+                child: _StudentDashboardStatCard(
+                  icon: Icons.bookmark_added_rounded,
+                  title: 'Currently Borrowed Books',
+                  value:
+                      '${stats.currentlyBorrowed} ${stats.currentlyBorrowed == 1 ? 'Book' : 'Books'}',
+                  onTap: () => _openStudentBorrowHistory(returned: false),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _StudentDashboardStatCard(
+                  icon: Icons.assignment_return_rounded,
+                  title: 'Returned Books',
+                  value:
+                      '${stats.returned} ${stats.returned == 1 ? 'Book' : 'Books'}',
+                  onTap: () => _openStudentBorrowHistory(returned: true),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _openStudentBorrowHistory({required bool returned}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _StudentBorrowHistoryPage(
+          title: returned ? 'Returned Books' : 'Currently Borrowed Books',
+          emptyMessage: returned
+              ? 'No returned books yet.'
+              : 'No currently borrowed books yet.',
+          stream: _studentBorrowRecordsStream(returned: returned),
+        ),
+      ),
+    );
+  }
+
   Widget _buildHeader() {
     final user = FirebaseAuth.instance.currentUser;
 
@@ -530,6 +774,8 @@ class _HomePageState extends State<HomePage> {
         name: 'Student',
         photoUrl: '',
         onProfileTap: () {},
+        unreadCount: 0,
+        onNotificationTap: _openNotificationPanel,
       );
     }
 
@@ -560,10 +806,132 @@ class _HomePageState extends State<HomePage> {
             onProfileTap: () {
               // The Profile tab already owns profile details and settings.
             },
+            unreadCount: _unreadNotificationCount,
+            onNotificationTap: _openNotificationPanel,
           );
         },
       ),
     );
+  }
+
+  void _listenForStudentNotifications() {
+    _notificationSubscription = _notificationsStream.listen((notifications) {
+      if (!mounted) return;
+      setState(() {
+        _notifications = notifications;
+        _unreadNotificationCount = notifications
+            .where((notification) => !notification.isRead)
+            .length;
+      });
+    });
+  }
+
+  void _openNotificationPanel() {
+    setState(() => _unreadNotificationCount = 0);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        return StreamBuilder<List<AppNotification>>(
+          stream: _notificationsStream,
+          initialData: _notifications,
+          builder: (context, snapshot) {
+            return _StudentNotificationSheet(
+              notifications: snapshot.data ?? _notifications,
+            );
+          },
+        );
+      },
+    );
+    unawaited(NotificationService.markAllRead(role: 'student'));
+  }
+
+  void _listenForStudentDueNotifications(String userUid) {
+    _overdueSubscription = FirebaseFirestore.instance
+        .collection('borrow_records')
+        .where('studentUid', isEqualTo: userUid)
+        .snapshots()
+        .listen((snapshot) {
+          _createDueNotificationsForDocs(userUid, snapshot.docs);
+        });
+  }
+
+  void _scheduleStudentDueNotificationChecks(String userUid) {
+    unawaited(_checkStudentDueNotifications(userUid));
+    _dueNotificationTimer = Timer.periodic(const Duration(hours: 1), (_) {
+      unawaited(_checkStudentDueNotifications(userUid));
+    });
+  }
+
+  Future<void> _checkStudentDueNotifications(String userUid) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('borrow_records')
+          .where('studentUid', isEqualTo: userUid)
+          .get();
+      _createDueNotificationsForDocs(userUid, snapshot.docs);
+    } catch (e) {
+      debugPrint('[Notifications] Could not check student due dates: $e');
+    }
+  }
+
+  void _createDueNotificationsForDocs(
+    String userUid,
+    Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final now = DateTime.now();
+    for (final doc in docs) {
+      final data = doc.data();
+      final status = _profileValue(data['status'], fallback: '').toLowerCase();
+      if (status != 'active' && status != 'borrowed') continue;
+
+      final explicitDue = _timestampMillis(data['dueDate'] ?? data['due_date']);
+      final dueMillis = explicitDue != 0
+          ? explicitDue
+          : _fallbackDueMillis(data);
+      if (dueMillis == 0) continue;
+
+      final dueDate = DateTime.fromMillisecondsSinceEpoch(dueMillis);
+      final daysUntilDue = _daysUntilDue(now, dueDate);
+
+      if (daysUntilDue >= 1 && daysUntilDue <= 3) {
+        unawaited(
+          NotificationService.ensureDueSoonNotification(
+            recordId: doc.id,
+            bookId: _profileValue(data['bookId'], fallback: ''),
+            bookTitle: _profileValue(
+              data['bookTitle'] ?? data['title'],
+              fallback: 'a book',
+            ),
+            studentUid: userUid,
+            dueDate: dueDate,
+            daysUntilDue: daysUntilDue,
+          ),
+        );
+        continue;
+      }
+
+      if (now.millisecondsSinceEpoch <= dueMillis) continue;
+
+      unawaited(
+        NotificationService.ensureOverdueNotification(
+          recordId: doc.id,
+          bookId: _profileValue(data['bookId'], fallback: ''),
+          bookTitle: _profileValue(
+            data['bookTitle'] ?? data['title'],
+            fallback: 'a book',
+          ),
+          borrowerName: _profileValue(
+            data['borrowerName'] ?? data['studentName'] ?? data['name'],
+            fallback: 'Student',
+          ),
+          studentUid: userUid,
+          dueDate: dueDate,
+          role: 'student',
+        ),
+      );
+    }
   }
 
   String _profileValue(Object? value, {required String fallback}) {
@@ -571,6 +939,32 @@ class _HomePageState extends State<HomePage> {
       return value.trim();
     }
     return fallback;
+  }
+
+  int _timestampMillis(Object? value) {
+    if (value is Timestamp) {
+      return value.millisecondsSinceEpoch;
+    }
+    return 0;
+  }
+
+  int _fallbackDueMillis(Map<String, dynamic> data) {
+    final borrowedMillis = _timestampMillis(
+      data['borrowed_at'] ??
+          data['borrowedAt'] ??
+          data['scanned_at'] ??
+          data['scannedAt'] ??
+          data['created_at'] ??
+          data['createdAt'],
+    );
+    if (borrowedMillis == 0) return 0;
+    return borrowedMillis + const Duration(days: 7).inMilliseconds;
+  }
+
+  int _daysUntilDue(DateTime now, DateTime dueDate) {
+    final today = DateTime(now.year, now.month, now.day);
+    final dueDay = DateTime(dueDate.year, dueDate.month, dueDate.day);
+    return dueDay.difference(today).inDays;
   }
 
   // ---------------------------------------------------------------------------
@@ -1023,16 +1417,674 @@ class _HomeMessage extends StatelessWidget {
   }
 }
 
+class _StudentDashboardStatCard extends StatelessWidget {
+  const _StudentDashboardStatCard({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      elevation: 6,
+      shadowColor: Colors.black.withValues(alpha: 0.22),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          height: 82,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
+            children: [
+              Icon(icon, size: 30, color: const Color(0xFF2BA6A3)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: double.infinity,
+                      child: FittedBox(
+                        alignment: Alignment.centerLeft,
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          style: const TextStyle(
+                            color: Color(0xFF242631),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FittedBox(
+                        alignment: Alignment.centerLeft,
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          value,
+                          maxLines: 1,
+                          style: const TextStyle(
+                            color: Color(0xFF11121A),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 2),
+              const Icon(Icons.chevron_right_rounded, size: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StudentBorrowHistoryPage extends StatelessWidget {
+  const _StudentBorrowHistoryPage({
+    required this.title,
+    required this.emptyMessage,
+    required this.stream,
+  });
+
+  final String title;
+  final String emptyMessage;
+  final Stream<List<_StudentBorrowRecord>> stream;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFE3E7EB),
+      body: SafeArea(
+        child: RefreshIndicator(
+          color: const Color(0xFF2BA6A3),
+          onRefresh: () async {},
+          child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics(),
+            ),
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(18, 14, 18, 28),
+                sliver: SliverList(
+                  delegate: SliverChildListDelegate([
+                    _StudentBorrowHistoryTopBar(title: title),
+                    const SizedBox(height: 18),
+                    StreamBuilder<List<_StudentBorrowRecord>>(
+                      stream: stream,
+                      builder: (context, snapshot) {
+                        if (snapshot.hasError) {
+                          return const _HomeMessage(
+                            icon: Icons.error_outline_rounded,
+                            message: 'Could not load books.',
+                          );
+                        }
+
+                        if (snapshot.connectionState ==
+                                ConnectionState.waiting &&
+                            !snapshot.hasData) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 42),
+                            child: Center(
+                              child: CircularProgressIndicator(
+                                color: Color(0xFF2BA6A3),
+                              ),
+                            ),
+                          );
+                        }
+
+                        final records = snapshot.data ?? [];
+                        if (records.isEmpty) {
+                          return _HomeMessage(
+                            icon: Icons.library_books_outlined,
+                            message: emptyMessage,
+                          );
+                        }
+
+                        return Column(
+                          children: records
+                              .map(
+                                (record) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 14),
+                                  child: _StudentBorrowRecordCard(
+                                    record: record,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        );
+                      },
+                    ),
+                  ]),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StudentBorrowHistoryTopBar extends StatelessWidget {
+  const _StudentBorrowHistoryTopBar({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 46,
+      child: Row(
+        children: [
+          _AniyomiTapResponse(
+            onTap: () => Navigator.pop(context),
+            child: const Icon(
+              Icons.arrow_back_ios_new_rounded,
+              color: Color(0xFF121926),
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFF121926),
+                fontSize: 21,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StudentBorrowRecordCard extends StatelessWidget {
+  const _StudentBorrowRecordCard({required this.record});
+
+  final _StudentBorrowRecord record;
+
+  void _showDetail(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _StudentBorrowDetailSheet(record: record),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _AniyomiTapResponse(
+      onTap: () => _showDetail(context),
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        elevation: 4,
+        shadowColor: Colors.black.withValues(alpha: 0.16),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              _StudentBorrowCover(coverUrl: record.coverUrl),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            record.bookTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xFF11121A),
+                              fontSize: 14,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _StudentBorrowStatusPill(record: record),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      record.author,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF11121A),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      record.isReturned
+                          ? 'Returned ${_studentDateLabel(record.returnedAtMillis)}'
+                          : 'Borrowed ${_studentDateLabel(record.borrowedAtMillis)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF565B66),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StudentBorrowCover extends StatelessWidget {
+  const _StudentBorrowCover({required this.coverUrl});
+
+  final String coverUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        width: 58,
+        height: 72,
+        child: coverUrl.isEmpty
+            ? const _StudentBorrowCoverFallback()
+            : Image.network(
+                coverUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  return const _StudentBorrowCoverFallback();
+                },
+              ),
+      ),
+    );
+  }
+}
+
+class _StudentBorrowCoverFallback extends StatelessWidget {
+  const _StudentBorrowCoverFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return const ColoredBox(
+      color: Colors.black,
+      child: Center(child: Icon(Icons.menu_book_rounded, color: Colors.white)),
+    );
+  }
+}
+
+class _StudentBorrowStatusPill extends StatelessWidget {
+  const _StudentBorrowStatusPill({required this.record});
+
+  final _StudentBorrowRecord record;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: record.statusColor.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        record.statusLabel,
+        style: TextStyle(
+          color: record.statusColor,
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0,
+        ),
+      ),
+    );
+  }
+}
+
+class _StudentBorrowDetailSheet extends StatelessWidget {
+  const _StudentBorrowDetailSheet({required this.record});
+
+  final _StudentBorrowRecord record;
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.64,
+      minChildSize: 0.38,
+      maxChildSize: 0.88,
+      expand: false,
+      builder: (_, controller) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFFF7F8FA),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: Column(
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 12, bottom: 4),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: const Color(0xFFD0D5DD),
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+              child: Row(
+                children: [
+                  const Text(
+                    'Book Details',
+                    style: TextStyle(
+                      color: Color(0xFF121926),
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Color(0xFF565B66),
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                controller: controller,
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: _studentDetailCardDecoration(),
+                    child: Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: SizedBox(
+                            width: 66,
+                            height: 82,
+                            child: record.coverUrl.isEmpty
+                                ? const _StudentBorrowCoverFallback()
+                                : Image.network(
+                                    record.coverUrl,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, _, _) =>
+                                        const _StudentBorrowCoverFallback(),
+                                  ),
+                          ),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                record.isReturned
+                                    ? 'BOOK RETURNED'
+                                    : 'BOOK BORROWED',
+                                style: const TextStyle(
+                                  color: Color(0xFF2BA6A3),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.4,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                record.bookTitle,
+                                style: const TextStyle(
+                                  color: Color(0xFF11121A),
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                record.author,
+                                style: const TextStyle(
+                                  color: Color(0xFF565B66),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 0,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              _StudentBorrowStatusPill(record: record),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 18,
+                    ),
+                    decoration: _studentDetailCardDecoration(),
+                    child: Column(
+                      children: [
+                        _StudentDateInfoRow(
+                          icon: Icons.login_rounded,
+                          label: 'Borrowed On',
+                          value: _studentDateTimeLabel(record.borrowedAtMillis),
+                        ),
+                        const SizedBox(height: 14),
+                        const Divider(height: 1, color: Color(0xFFE4E7EC)),
+                        const SizedBox(height: 14),
+                        _StudentDateInfoRow(
+                          icon: Icons.event_rounded,
+                          label: 'Due Date',
+                          value: _studentDateTimeLabel(record.dueDateMillis),
+                          valueColor: record.isOverdue
+                              ? const Color(0xFFE43C44)
+                              : const Color(0xFF2BA6A3),
+                          trailingBadge: record.isOverdue ? 'OVERDUE' : null,
+                        ),
+                        const SizedBox(height: 14),
+                        const Divider(height: 1, color: Color(0xFFE4E7EC)),
+                        const SizedBox(height: 14),
+                        _StudentDateInfoRow(
+                          icon: Icons.logout_rounded,
+                          label: 'Returned On',
+                          value: record.isReturned
+                              ? _studentDateTimeLabel(record.returnedAtMillis)
+                              : 'Not yet returned',
+                          valueColor: record.isReturned
+                              ? const Color(0xFF4B23C6)
+                              : const Color(0xFF8A93A2),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StudentDateInfoRow extends StatelessWidget {
+  const _StudentDateInfoRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.valueColor = const Color(0xFF11121A),
+    this.trailingBadge,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color valueColor;
+  final String? trailingBadge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: const Color(0xFF2BA6A3).withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: const Color(0xFF2BA6A3), size: 18),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Color(0xFF8A93A2),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                value,
+                style: TextStyle(
+                  color: valueColor,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (trailingBadge != null)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFE43C44).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              trailingBadge!,
+              style: const TextStyle(
+                color: Color(0xFFE43C44),
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+BoxDecoration _studentDetailCardDecoration() {
+  return BoxDecoration(
+    color: Colors.white,
+    borderRadius: BorderRadius.circular(22),
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black.withValues(alpha: 0.08),
+        blurRadius: 12,
+        offset: const Offset(0, 4),
+      ),
+    ],
+  );
+}
+
+String _studentDateLabel(int millis) {
+  if (millis == 0) return 'N/A';
+  final dt = DateTime.fromMillisecondsSinceEpoch(millis);
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  return '${months[dt.month - 1]} ${dt.day}, ${dt.year}';
+}
+
+String _studentDateTimeLabel(int millis) {
+  if (millis == 0) return 'N/A';
+  final dt = DateTime.fromMillisecondsSinceEpoch(millis);
+  final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+  final minute = dt.minute.toString().padLeft(2, '0');
+  final period = dt.hour < 12 ? 'AM' : 'PM';
+  return '${_studentDateLabel(millis)} • $hour:$minute $period';
+}
+
 class _HomeHeaderContent extends StatelessWidget {
   const _HomeHeaderContent({
     required this.name,
     required this.photoUrl,
     required this.onProfileTap,
+    required this.unreadCount,
+    required this.onNotificationTap,
   });
 
   final String name;
   final String photoUrl;
   final VoidCallback onProfileTap;
+  final int unreadCount;
+  final VoidCallback onNotificationTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1069,7 +2121,275 @@ class _HomeHeaderContent extends StatelessWidget {
             ],
           ),
         ),
+        _NotificationButton(unreadCount: unreadCount, onTap: onNotificationTap),
       ],
+    );
+  }
+}
+
+class _NotificationButton extends StatelessWidget {
+  const _NotificationButton({required this.unreadCount, required this.onTap});
+
+  final int unreadCount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 46,
+        height: 46,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFD9DEE8)),
+                ),
+                child: const Icon(
+                  Icons.notifications_rounded,
+                  color: Color(0xFF4B23C6),
+                  size: 22,
+                ),
+              ),
+            ),
+            if (unreadCount > 0)
+              Positioned(
+                right: -2,
+                top: -2,
+                child: Container(
+                  constraints: const BoxConstraints(
+                    minWidth: 18,
+                    minHeight: 18,
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE43C44),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: const Color(0xFFE3E7EB)),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    unreadCount > 9 ? '9+' : '$unreadCount',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      height: 1,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StudentNotificationSheet extends StatelessWidget {
+  const _StudentNotificationSheet({required this.notifications});
+
+  final List<AppNotification> notifications;
+
+  String _timeAgo(DateTime time) {
+    final diff = DateTime.now().difference(time);
+    if (diff.inSeconds < 60) return 'Just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
+
+  IconData _iconFor(AppNotificationType type) {
+    switch (type) {
+      case AppNotificationType.borrowConfirmed:
+        return Icons.check_circle_rounded;
+      case AppNotificationType.returnConfirmed:
+        return Icons.assignment_return_rounded;
+      case AppNotificationType.dueSoon:
+        return Icons.schedule_rounded;
+      case AppNotificationType.overdue:
+        return Icons.warning_amber_rounded;
+      case AppNotificationType.newBorrow:
+        return Icons.bookmark_added_rounded;
+      case AppNotificationType.general:
+        return Icons.notifications_rounded;
+    }
+  }
+
+  Color _colorFor(AppNotificationType type) {
+    switch (type) {
+      case AppNotificationType.overdue:
+        return const Color(0xFFE43C44);
+      case AppNotificationType.dueSoon:
+        return const Color(0xFFE2A346);
+      case AppNotificationType.returnConfirmed:
+        return const Color(0xFF4B23C6);
+      case AppNotificationType.borrowConfirmed:
+      case AppNotificationType.newBorrow:
+        return const Color(0xFF2BA6A3);
+      case AppNotificationType.general:
+        return const Color(0xFF4B23C6);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.65,
+      minChildSize: 0.35,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, controller) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFFF7F8FA),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: Column(
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 12, bottom: 4),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: const Color(0xFFD0D5DD),
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 8, 0),
+              child: Row(
+                children: [
+                  const Text(
+                    'Notifications',
+                    style: TextStyle(
+                      color: Color(0xFF121926),
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0,
+                    ),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.close_rounded,
+                      color: Color(0xFF565B66),
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: notifications.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.notifications_none_rounded,
+                            size: 48,
+                            color: Color(0xFFABB6C2),
+                          ),
+                          SizedBox(height: 12),
+                          Text(
+                            'No notifications yet',
+                            style: TextStyle(
+                              color: Color(0xFF8A93A2),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: controller,
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+                      itemCount: notifications.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final notification = notifications[index];
+                        final color = _colorFor(notification.type);
+                        return Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.07),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Icon(
+                                  _iconFor(notification.type),
+                                  size: 20,
+                                  color: color,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      notification.title,
+                                      style: const TextStyle(
+                                        color: Color(0xFF11121A),
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 0,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      notification.body,
+                                      style: const TextStyle(
+                                        color: Color(0xFF565B66),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        letterSpacing: 0,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      _timeAgo(notification.createdAt),
+                                      style: const TextStyle(
+                                        color: Color(0xFFABB6C2),
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

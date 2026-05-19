@@ -50,11 +50,6 @@ class LibrarianProfilePage extends StatelessWidget {
                   _InfoPanel(
                     children: [
                       _InfoRow(
-                        icon: Icons.badge_outlined,
-                        label: 'Librarian ID',
-                        value: profile.staffId,
-                      ),
-                      _InfoRow(
                         icon: Icons.mail_outline_rounded,
                         label: 'Email',
                         value: profile.email,
@@ -129,7 +124,6 @@ class _LibrarianProfileSettingsPageState
     extends State<LibrarianProfileSettingsPage> {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
-  final _staffIdController = TextEditingController();
   final _imagePicker = ImagePicker();
   final _storageService = StorageService();
 
@@ -140,15 +134,11 @@ class _LibrarianProfileSettingsPageState
   void initState() {
     super.initState();
     _nameController.text = widget.profile.name;
-    _staffIdController.text = widget.profile.staffId == 'Not set'
-        ? ''
-        : widget.profile.staffId;
   }
 
   @override
   void dispose() {
     _nameController.dispose();
-    _staffIdController.dispose();
     super.dispose();
   }
 
@@ -184,7 +174,6 @@ class _LibrarianProfileSettingsPageState
       }
 
       final name = _nameController.text.trim();
-      final staffId = _staffIdController.text.trim();
 
       await user.updateDisplayName(name);
       if (_selectedImage != null && photoUrl.isNotEmpty) {
@@ -195,8 +184,6 @@ class _LibrarianProfileSettingsPageState
         'uid': user.uid,
         'name': name,
         'displayName': name,
-        'schoolId': staffId,
-        'staffId': staffId,
         'email': widget.profile.email,
         'role': 'librarian',
         'accountType': 'librarian',
@@ -269,18 +256,6 @@ class _LibrarianProfileSettingsPageState
                             return null;
                           },
                         ),
-                        const SizedBox(height: 14),
-                        _SettingsField(
-                          controller: _staffIdController,
-                          label: 'Librarian ID',
-                          icon: Icons.badge_outlined,
-                          validator: (value) {
-                            if (value == null || value.trim().isEmpty) {
-                              return 'Please enter your librarian ID.';
-                            }
-                            return null;
-                          },
-                        ),
                       ],
                     ),
                   ),
@@ -343,7 +318,6 @@ class LibrarianProfile {
   const LibrarianProfile({
     required this.uid,
     required this.name,
-    required this.staffId,
     required this.email,
     required this.role,
     required this.photoUrl,
@@ -351,7 +325,6 @@ class LibrarianProfile {
 
   final String uid;
   final String name;
-  final String staffId;
   final String email;
   final String role;
   final String photoUrl;
@@ -365,10 +338,6 @@ class LibrarianProfile {
       name: _stringValue(
         data?['name'],
         fallback: user.displayName ?? 'Librarian',
-      ),
-      staffId: _stringValue(
-        data?['staffId'] ?? data?['schoolId'],
-        fallback: 'Not set',
       ),
       email: _stringValue(data?['email'], fallback: user.email ?? 'No email'),
       role: _formatRole(_stringValue(data?['role'], fallback: 'librarian')),
@@ -462,16 +431,6 @@ class _ProfileHeader extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-          Text(
-            profile.staffId,
-            style: const TextStyle(
-              fontSize: 14,
-              color: Color(0xFF5A5862),
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0,
-            ),
-          ),
-          const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
             decoration: BoxDecoration(

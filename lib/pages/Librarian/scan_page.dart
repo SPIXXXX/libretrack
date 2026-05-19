@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:libretrack/services/borrow_penalty_service.dart';
+import 'package:libretrack/services/notification_service.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 class LibrarianScanPage extends StatefulWidget {
@@ -139,6 +142,14 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
           throw Exception('This student already borrowed this book.');
         }
 
+        final penalty = await BorrowPenaltyService.activePenaltyFor(
+          studentUid: payload.studentUid ?? '',
+          studentId: payload.studentId ?? '',
+        );
+        if (penalty.hasActiveOverdue) {
+          throw Exception('Borrow blocked. ${penalty.blockedBorrowMessage}');
+        }
+
         // Show confirm dialog — lets librarian review details and set due date.
         if (!mounted) return;
         final confirmed = await _showBorrowConfirmDialog(
@@ -198,6 +209,7 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             'studentUid': payload.studentUid ?? '',
             'borrowerName': borrowerName,
             'status': 'borrowed',
+            'penaltyStatus': 'none',
             'scanMode': 'borrow',
             'rawScan': rawCode,
             'librarianId': user?.uid ?? '',
@@ -211,11 +223,21 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             'updatedAt': FieldValue.serverTimestamp(),
           });
         });
+        unawaited(
+          NotificationService.createBorrowNotifications(
+            recordId: recordRef.id,
+            bookId: book.id,
+            bookTitle: book.title,
+            borrowerName: borrowerName,
+            studentUid: payload.studentUid ?? '',
+            dueDate: dueDate,
+          ),
+        );
         _showSnackBar('Borrow confirmed. Due ${_formatDate(dueDate)}.');
       } else {
         final activeRecord = await _findActiveBorrowRecord(book, payload);
         if (activeRecord == null) {
-          await records.add({
+          final returnRecord = await records.add({
             'bookId': book.id,
             'isbn': book.isbn,
             'bookTitle': book.title,
@@ -227,6 +249,7 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             'studentUid': payload.studentUid ?? '',
             'borrowerName': borrowerName,
             'status': 'returned',
+            'penaltyStatus': 'cleared',
             'scanMode': 'return',
             'rawScan': rawCode,
             'librarianId': user?.uid ?? '',
@@ -237,6 +260,14 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             'createdAt': FieldValue.serverTimestamp(),
             'updatedAt': FieldValue.serverTimestamp(),
           });
+          unawaited(
+            NotificationService.createReturnNotification(
+              recordId: returnRecord.id,
+              bookId: book.id,
+              bookTitle: book.title,
+              studentUid: payload.studentUid ?? '',
+            ),
+          );
         } else {
           final bookRef = FirebaseFirestore.instance
               .collection('books')
@@ -276,9 +307,11 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
             });
             transaction.update(activeRecord.reference, {
               'status': 'returned',
+              'penaltyStatus': 'cleared',
               'scanMode': 'return',
               'returnRawScan': rawCode,
               'returnedBy': user?.uid ?? '',
+              'overdueClearedAt': FieldValue.serverTimestamp(),
               'returned_at': FieldValue.serverTimestamp(),
               'returnedAt': FieldValue.serverTimestamp(),
               'scanned_at': FieldValue.serverTimestamp(),
@@ -286,6 +319,14 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
               'updatedAt': FieldValue.serverTimestamp(),
             });
           });
+          unawaited(
+            NotificationService.createReturnNotification(
+              recordId: activeRecord.id,
+              bookId: book.id,
+              bookTitle: book.title,
+              studentUid: payload.studentUid ?? '',
+            ),
+          );
         }
         _showSnackBar('Return QR scanned successfully.');
       }
@@ -483,7 +524,9 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
     required _ScannedBook book,
     required String borrowerName,
   }) async {
-    DateTime selectedDue = DateTime.now().add(const Duration(days: 14));
+    DateTime selectedDue = _endOfDay(
+      DateTime.now().add(const Duration(days: 14)),
+    );
 
     return showDialog<DateTime>(
       context: context,
@@ -536,7 +579,7 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
                               ? Image.network(
                                   book.coverUrl,
                                   fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) =>
+                                  errorBuilder: (_, _, _) =>
                                       _ConfirmCoverFallback(title: book.title),
                                 )
                               : _ConfirmCoverFallback(title: book.title),
@@ -626,7 +669,7 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
                       final picked = await showDatePicker(
                         context: ctx,
                         initialDate: selectedDue,
-                        firstDate: DateTime.now(),
+                        firstDate: _startOfDay(DateTime.now()),
                         lastDate: DateTime.now().add(const Duration(days: 365)),
                         builder: (ctx, child) => Theme(
                           data: Theme.of(ctx).copyWith(
@@ -640,7 +683,7 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
                         ),
                       );
                       if (picked != null) {
-                        setDialogState(() => selectedDue = picked);
+                        setDialogState(() => selectedDue = _endOfDay(picked));
                       }
                     },
                     child: Container(
@@ -757,6 +800,14 @@ class _LibrarianScanPageState extends State<LibrarianScanPage> {
       'Dec',
     ];
     return '${months[dt.month - 1]} ${dt.day}, ${dt.year}';
+  }
+
+  DateTime _startOfDay(DateTime date) {
+    return DateTime(date.year, date.month, date.day);
+  }
+
+  DateTime _endOfDay(DateTime date) {
+    return DateTime(date.year, date.month, date.day, 23, 59, 59, 999);
   }
 
   void _showSnackBar(String message, {bool isError = false}) {

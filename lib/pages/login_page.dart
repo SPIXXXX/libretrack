@@ -1,11 +1,12 @@
 // FirebaseAuth is used here to sign in existing LibraTrack users.
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:libretrack/pages/Admin/admin_page.dart';
 import 'package:libretrack/pages/Librarian/librarian_page.dart';
 import 'package:libretrack/pages/Student/home_page.dart';
 import 'package:libretrack/pages/forgot_password_page.dart';
 import 'package:libretrack/pages/register_page.dart';
+import 'package:libretrack/services/user_role_service.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -33,18 +34,42 @@ class _LoginPageState extends State<LoginPage> {
     return credential.user!;
   }
 
-  Future<Widget> _landingPageFor(User user) async {
-    final snapshot = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .get();
-    final data = snapshot.data();
-    final role = (data?['role'] ?? data?['accountType'] ?? 'student')
-        .toString()
-        .trim()
-        .toLowerCase();
+  String _loginErrorMessage(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'invalid-credential':
+      case 'wrong-password':
+        return 'Incorrect Firebase Auth password. The password field in Firestore is not used for login, so reset this user in Firebase Authentication.';
+      case 'user-not-found':
+        return 'No Firebase Authentication account uses this email.';
+      case 'invalid-email':
+        return 'Please enter a valid email address.';
+      case 'network-request-failed':
+        return 'Please check your internet connection and try again.';
+      case 'too-many-requests':
+        return 'Firebase temporarily blocked this device after too many failed login attempts. Wait a while, then try again after resetting the Auth password.';
+      case 'account-disabled':
+        return e.message ??
+            'This account has been disabled by the administrator.';
+      default:
+        return e.message ?? 'Login failed. Please try again.';
+    }
+  }
 
-    if (role == 'librarian') {
+  Future<Widget> _landingPageFor(User user) async {
+    final profile = await UserRoleService.profileFor(user);
+    if (profile.disabled) {
+      await FirebaseAuth.instance.signOut();
+      throw FirebaseAuthException(
+        code: 'account-disabled',
+        message: 'This account has been disabled by the administrator.',
+      );
+    }
+
+    if (profile.role == 'admin') {
+      return const AdminPage();
+    }
+
+    if (profile.role == 'librarian') {
       return const LibrarianPage();
     }
 
@@ -206,9 +231,7 @@ class _LoginPageState extends State<LoginPage> {
                                         context,
                                       ).showSnackBar(
                                         SnackBar(
-                                          content: Text(
-                                            e.message ?? 'Login failed',
-                                          ),
+                                          content: Text(_loginErrorMessage(e)),
                                         ),
                                       );
                                       setState(() => _isLoading = false);

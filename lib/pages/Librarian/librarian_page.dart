@@ -1,10 +1,12 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:libretrack/pages/Librarian/librarian_books_tab.dart';
 import 'package:libretrack/pages/Librarian/librarian_profile_page.dart';
 import 'package:libretrack/pages/Librarian/scan_page.dart';
+import 'package:libretrack/services/notification_service.dart';
 
 class LibrarianPage extends StatefulWidget {
   const LibrarianPage({super.key});
@@ -17,83 +19,37 @@ class _LibrarianPageState extends State<LibrarianPage> {
   int _navIndex = 0;
 
   // ── FCM / notification state ──────────────────────────────────────────────
-  final List<_AppNotification> _notifications = [];
+  List<AppNotification> _notifications = [];
   bool _hasUnread = false;
+  StreamSubscription<List<AppNotification>>? _notificationSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _overdueSubscription;
 
   @override
   void initState() {
     super.initState();
-    _initFcm();
+    unawaited(NotificationService.registerCurrentDevice(role: 'librarian'));
+    _listenForNotifications();
     _listenForOverdueNotifications();
-    _listenForNewBorrows();
   }
 
-  Future<void> _initFcm() async {
-    final messaging = FirebaseMessaging.instance;
-    await messaging.requestPermission(alert: true, badge: true, sound: true);
-
-    // Handle foreground messages
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      final title = message.notification?.title ?? 'Notification';
-      final body = message.notification?.body ?? '';
-      if (mounted) {
-        setState(() {
-          _notifications.insert(
-            0,
-            _AppNotification(
-              title: title,
-              body: body,
-              time: DateTime.now(),
-              type: _NotificationType.general,
-            ),
-          );
-          _hasUnread = true;
-        });
-      }
-    });
-  }
-
-  /// Watch active borrow_records and fire an in-app notification when a new
-  /// borrow appears (i.e. a student just borrowed a book).
-  void _listenForNewBorrows() {
-    FirebaseFirestore.instance
-        .collection('borrow_records')
-        .where('status', whereIn: ['active', 'borrowed'])
-        .snapshots()
-        .listen((snap) {
-          for (final change in snap.docChanges) {
-            if (change.type == DocumentChangeType.added) {
-              final data = change.doc.data()!;
-              final borrower = _stringValue(
-                data['borrowerName'] ?? data['studentName'] ?? data['name'],
-                fallback: 'A student',
-              );
-              final book = _stringValue(
-                data['bookTitle'] ?? data['title'],
-                fallback: 'a book',
-              );
-              if (mounted) {
-                setState(() {
-                  _notifications.insert(
-                    0,
-                    _AppNotification(
-                      title: 'New Borrow',
-                      body: '$borrower borrowed "$book"',
-                      time: DateTime.now(),
-                      type: _NotificationType.newBorrow,
-                    ),
-                  );
-                  _hasUnread = true;
-                });
-              }
-            }
-          }
+  void _listenForNotifications() {
+    _notificationSubscription =
+        NotificationService.notificationsStream(role: 'librarian').listen((
+          notifications,
+        ) {
+          if (!mounted) return;
+          setState(() {
+            _notifications = notifications;
+            _hasUnread = notifications.any(
+              (notification) => !notification.isRead,
+            );
+          });
         });
   }
 
   /// Watch active records and flag any that are overdue (past due date).
   void _listenForOverdueNotifications() {
-    FirebaseFirestore.instance
+    _overdueSubscription = FirebaseFirestore.instance
         .collection('borrow_records')
         .where('status', whereIn: ['active', 'borrowed'])
         .snapshots()
@@ -126,26 +82,17 @@ class _LibrarianPageState extends State<LibrarianPage> {
                 data['bookTitle'] ?? data['title'],
                 fallback: 'a book',
               );
-              // Avoid duplicate overdue notifications per record
-              final alreadyAdded = _notifications.any(
-                (n) =>
-                    n.type == _NotificationType.overdue && n.recordId == doc.id,
+              unawaited(
+                NotificationService.ensureOverdueNotification(
+                  recordId: doc.id,
+                  bookId: _stringValue(data['bookId'], fallback: ''),
+                  bookTitle: book,
+                  borrowerName: borrower,
+                  studentUid: _stringValue(data['studentUid'], fallback: ''),
+                  dueDate: dueDate,
+                  role: 'librarian',
+                ),
               );
-              if (!alreadyAdded && mounted) {
-                setState(() {
-                  _notifications.insert(
-                    0,
-                    _AppNotification(
-                      title: 'Overdue Book',
-                      body: '$borrower has not returned "$book" — overdue!',
-                      time: DateTime.now(),
-                      type: _NotificationType.overdue,
-                      recordId: doc.id,
-                    ),
-                  );
-                  _hasUnread = true;
-                });
-              }
             }
           }
         });
@@ -153,12 +100,20 @@ class _LibrarianPageState extends State<LibrarianPage> {
 
   void _openNotificationPanel() {
     setState(() => _hasUnread = false);
+    unawaited(NotificationService.markAllRead(role: 'librarian'));
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _NotificationSheet(notifications: _notifications),
     );
+  }
+
+  @override
+  void dispose() {
+    unawaited(_notificationSubscription?.cancel());
+    unawaited(_overdueSubscription?.cancel());
+    super.dispose();
   }
 
   Stream<int> _bookCountStream() {
@@ -1982,7 +1937,7 @@ class _BorrowerDetailSheetState extends State<_BorrowerDetailSheet> {
                                 ? Image.network(
                                     _resolvedPhotoUrl,
                                     fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) =>
+                                    errorBuilder: (_, _, _) =>
                                         _StudentInitialAvatar(initial: initial),
                                   )
                                 : _StudentInitialAvatar(initial: initial),
@@ -2098,17 +2053,16 @@ class _BorrowerDetailSheetState extends State<_BorrowerDetailSheet> {
                                 : Image.network(
                                     record.coverUrl,
                                     fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) =>
-                                        const ColoredBox(
-                                          color: Colors.black,
-                                          child: Center(
-                                            child: Icon(
-                                              Icons.menu_book_rounded,
-                                              color: Colors.white,
-                                              size: 28,
-                                            ),
-                                          ),
+                                    errorBuilder: (_, _, _) => const ColoredBox(
+                                      color: Colors.black,
+                                      child: Center(
+                                        child: Icon(
+                                          Icons.menu_book_rounded,
+                                          color: Colors.white,
+                                          size: 28,
                                         ),
+                                      ),
+                                    ),
                                   ),
                           ),
                         ),
@@ -2365,7 +2319,7 @@ class _ShimmerCircleState extends State<_ShimmerCircle>
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (_, __) => DecoratedBox(
+      builder: (_, _) => DecoratedBox(
         decoration: BoxDecoration(
           color: Color.lerp(
             const Color(0xFFE4E7EC),
@@ -2577,6 +2531,7 @@ class _BorrowerRecord {
     required this.borrowerName,
     required this.coverUrl,
     required this.borrowedAtMillis,
+    required this.dueDateMillis,
     required this.status,
     required this.studentId,
     required this.studentPhotoUrl,
@@ -2593,6 +2548,7 @@ class _BorrowerRecord {
   final String borrowerName;
   final String coverUrl;
   final int borrowedAtMillis;
+  final int dueDateMillis;
   final String status;
   final String studentId;
   final String studentPhotoUrl;
@@ -2606,11 +2562,6 @@ class _BorrowerRecord {
   final String recordId;
 
   bool get isReturned => status == 'returned' || status == 'return';
-
-  /// Due date = borrowedAt + 7 days (default loan period).
-  int get dueDateMillis => borrowedAtMillis == 0
-      ? 0
-      : borrowedAtMillis + const Duration(days: 7).inMilliseconds;
 
   bool get isOverdue {
     if (isReturned || dueDateMillis == 0) return false;
@@ -2626,6 +2577,17 @@ class _BorrowerRecord {
     QueryDocumentSnapshot<Map<String, dynamic>> doc,
   ) {
     final data = doc.data();
+    final borrowedAtMillis = _timestampMillis(
+      data['borrowed_at'] ??
+          data['borrowedAt'] ??
+          data['scanned_at'] ??
+          data['scannedAt'] ??
+          data['created_at'] ??
+          data['createdAt'],
+    );
+    final explicitDueDateMillis = _timestampMillis(
+      data['dueDate'] ?? data['due_date'],
+    );
 
     return _BorrowerRecord(
       bookTitle: _stringValue(
@@ -2641,15 +2603,12 @@ class _BorrowerRecord {
         data['cover_url'] ?? data['coverUrl'],
         fallback: '',
       ),
-      // borrowedAtMillis: prefer the actual borrow timestamp fields only
-      borrowedAtMillis: _timestampMillis(
-        data['borrowed_at'] ??
-            data['borrowedAt'] ??
-            data['scanned_at'] ??
-            data['scannedAt'] ??
-            data['created_at'] ??
-            data['createdAt'],
-      ),
+      borrowedAtMillis: borrowedAtMillis,
+      dueDateMillis: explicitDueDateMillis != 0
+          ? explicitDueDateMillis
+          : borrowedAtMillis == 0
+          ? 0
+          : borrowedAtMillis + const Duration(days: 7).inMilliseconds,
       status: _stringValue(data['status'], fallback: 'borrowed').toLowerCase(),
       studentId: _stringValue(
         data['studentId'] ?? data['student_id'] ?? data['idNumber'],
@@ -2852,32 +2811,12 @@ int _fallbackDueMillis(Map<String, dynamic> data) {
   return borrowedMillis + const Duration(days: 7).inMilliseconds;
 }
 
-// ─── Notification Model ──────────────────────────────────────────────────────
-
-enum _NotificationType { newBorrow, overdue, general }
-
-class _AppNotification {
-  const _AppNotification({
-    required this.title,
-    required this.body,
-    required this.time,
-    required this.type,
-    this.recordId,
-  });
-
-  final String title;
-  final String body;
-  final DateTime time;
-  final _NotificationType type;
-  final String? recordId;
-}
-
 // ─── Notification Bottom Sheet ───────────────────────────────────────────────
 
 class _NotificationSheet extends StatelessWidget {
   const _NotificationSheet({required this.notifications});
 
-  final List<_AppNotification> notifications;
+  final List<AppNotification> notifications;
 
   String _timeAgo(DateTime time) {
     final diff = DateTime.now().difference(time);
@@ -2887,24 +2826,36 @@ class _NotificationSheet extends StatelessWidget {
     return '${diff.inDays}d ago';
   }
 
-  IconData _iconFor(_NotificationType type) {
+  IconData _iconFor(AppNotificationType type) {
     switch (type) {
-      case _NotificationType.overdue:
+      case AppNotificationType.overdue:
         return Icons.warning_amber_rounded;
-      case _NotificationType.newBorrow:
+      case AppNotificationType.newBorrow:
         return Icons.bookmark_added_rounded;
-      case _NotificationType.general:
+      case AppNotificationType.borrowConfirmed:
+        return Icons.check_circle_rounded;
+      case AppNotificationType.returnConfirmed:
+        return Icons.assignment_return_rounded;
+      case AppNotificationType.dueSoon:
+        return Icons.schedule_rounded;
+      case AppNotificationType.general:
         return Icons.notifications_rounded;
     }
   }
 
-  Color _colorFor(_NotificationType type) {
+  Color _colorFor(AppNotificationType type) {
     switch (type) {
-      case _NotificationType.overdue:
+      case AppNotificationType.overdue:
         return const Color(0xFFE43C44);
-      case _NotificationType.newBorrow:
+      case AppNotificationType.newBorrow:
         return const Color(0xFF2BA6A3);
-      case _NotificationType.general:
+      case AppNotificationType.borrowConfirmed:
+        return const Color(0xFF19A7A1);
+      case AppNotificationType.returnConfirmed:
+        return const Color(0xFF4B23C6);
+      case AppNotificationType.dueSoon:
+        return const Color(0xFFE2A346);
+      case AppNotificationType.general:
         return const Color(0xFF4B23C6);
     }
   }
@@ -2985,7 +2936,7 @@ class _NotificationSheet extends StatelessWidget {
                       controller: controller,
                       padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
                       itemCount: notifications.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 10),
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
                       itemBuilder: (context, index) {
                         final n = notifications[index];
                         final color = _colorFor(n.type);
@@ -3044,7 +2995,7 @@ class _NotificationSheet extends StatelessWidget {
                                     ),
                                     const SizedBox(height: 6),
                                     Text(
-                                      _timeAgo(n.time),
+                                      _timeAgo(n.createdAt),
                                       style: const TextStyle(
                                         color: Color(0xFFABB6C2),
                                         fontSize: 11,

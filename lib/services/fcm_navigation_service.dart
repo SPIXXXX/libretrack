@@ -66,6 +66,7 @@ class FcmNavigationService {
         }
 
       // Student or librarian: a book is overdue
+      case 'due_soon':
       case 'overdue':
         if (role == 'student' && bookId != null) {
           await _pushBookDetails(nav, bookId);

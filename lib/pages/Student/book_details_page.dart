@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:libretrack/services/borrow_penalty_service.dart';
 import 'package:libretrack/services/borrow_service.dart';
 import 'package:libretrack/services/student_library_service.dart';
 import 'package:libretrack/widgets/borrow_qr_dialog.dart';
@@ -311,6 +312,15 @@ class _StudentBookDetailsPageState extends State<StudentBookDetailsPage> {
   }) async {
     try {
       if (!isReturn) {
+        final penalty = await BorrowPenaltyService.activePenaltyFor(
+          studentUid: student.uid,
+          studentId: student.studentId,
+        );
+        if (penalty.hasActiveOverdue) {
+          _showError(penalty.blockedBorrowMessage);
+          return;
+        }
+
         final bookSnap = await FirebaseFirestore.instance
             .collection('books')
             .doc(widget.book.id)
@@ -614,62 +624,91 @@ class _StudentBookDetailsPageState extends State<StudentBookDetailsPage> {
         // resolves the streams take over and correct anything if needed.
         final student = studentSnapshot.data;
 
-        return StreamBuilder<bool>(
+        return StreamBuilder<BorrowPenaltyStatus>(
           stream: student == null
-              ? const Stream.empty()
-              : _borrowedStateStream(student),
-          initialData: false,
-          builder: (context, borrowedSnapshot) {
-            return StreamBuilder<StudentBookDetailsData>(
-              stream: _bookStreamCached,
-              initialData: widget.book,
-              builder: (context, bookSnapshot) {
-                // initialData guarantees these are never null from the start.
-                final isBorrowed = borrowedSnapshot.data!;
-                final book = bookSnapshot.data!;
+              ? Stream.value(const BorrowPenaltyStatus(hasActiveOverdue: false))
+              : BorrowPenaltyService.activePenaltyStream(
+                  studentUid: student.uid,
+                  studentId: student.studentId,
+                ),
+          initialData: const BorrowPenaltyStatus(hasActiveOverdue: false),
+          builder: (context, penaltySnapshot) {
+            final penalty =
+                penaltySnapshot.data ??
+                const BorrowPenaltyStatus(hasActiveOverdue: false);
 
-                // Determine button state
-                final hasNoCopies = !book.hasAvailableCopies;
-                final canBorrow = !hasNoCopies || isBorrowed;
+            return StreamBuilder<bool>(
+              stream: student == null
+                  ? const Stream.empty()
+                  : _borrowedStateStream(student),
+              initialData: false,
+              builder: (context, borrowedSnapshot) {
+                return StreamBuilder<StudentBookDetailsData>(
+                  stream: _bookStreamCached,
+                  initialData: widget.book,
+                  builder: (context, bookSnapshot) {
+                    // initialData guarantees these are never null from the start.
+                    final isBorrowed = borrowedSnapshot.data!;
+                    final book = bookSnapshot.data!;
 
-                String label;
-                if (isBorrowed) {
-                  label = 'Return';
-                } else if (hasNoCopies) {
-                  label = 'No copies available';
-                } else {
-                  label = 'Borrow';
-                }
+                    // Determine button state.
+                    final hasNoCopies = !book.hasAvailableCopies;
+                    final hasBorrowBlock =
+                        penalty.hasActiveOverdue && !isBorrowed;
+                    final canBorrow =
+                        isBorrowed || (!hasNoCopies && !hasBorrowBlock);
 
-                return Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 14),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        book.availabilityLabel,
-                        style: TextStyle(
-                          color: book.hasAvailableCopies || isBorrowed
-                              ? const Color(0xFF197C79)
-                              : const Color(0xFFE43C44),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0,
-                        ),
+                    String label;
+                    if (isBorrowed) {
+                      label = 'Return';
+                    } else if (hasBorrowBlock) {
+                      label = 'Return overdue book first';
+                    } else if (hasNoCopies) {
+                      label = 'No copies available';
+                    } else {
+                      label = 'Borrow';
+                    }
+
+                    final statusText = hasBorrowBlock
+                        ? penalty.blockedBorrowMessage
+                        : book.availabilityLabel;
+
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 14),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            statusText,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color:
+                                  (book.hasAvailableCopies &&
+                                          !hasBorrowBlock) ||
+                                      isBorrowed
+                                  ? const Color(0xFF197C79)
+                                  : const Color(0xFFE43C44),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          _BorrowActionButton(
+                            label: label,
+                            isDisabled:
+                                !isBorrowed && (hasNoCopies || hasBorrowBlock),
+                            onPressed: (canBorrow && student != null)
+                                ? () => _showBorrowQr(
+                                    student: student,
+                                    isReturn: isBorrowed,
+                                  )
+                                : null,
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 8),
-                      _BorrowActionButton(
-                        label: label,
-                        isDisabled: hasNoCopies && !isBorrowed,
-                        onPressed: (canBorrow && student != null)
-                            ? () => _showBorrowQr(
-                                student: student,
-                                isReturn: isBorrowed,
-                              )
-                            : null,
-                      ),
-                    ],
-                  ),
+                    );
+                  },
                 );
               },
             );

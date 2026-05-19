@@ -2,13 +2,14 @@ import 'dart:async';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'pages/Admin/admin_page.dart';
 import 'pages/login_page.dart';
 import 'pages/Librarian/librarian_page.dart';
 import 'pages/Student/home_page.dart';
 import 'services/fcm_background_handler.dart'; // ← NEW
 import 'services/fcm_navigation_service.dart'; // ← NEW
+import 'services/user_role_service.dart';
 
 // GlobalKey lives here so both main() and MyApp can share it
 final GlobalKey<NavigatorState> _navigatorKey =
@@ -121,11 +122,8 @@ class RoleGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      future: FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .get(),
+    return FutureBuilder<UserRoleProfile>(
+      future: UserRoleService.profileFor(user),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
@@ -136,13 +134,17 @@ class RoleGate extends StatelessWidget {
           );
         }
 
-        final data = snapshot.data?.data();
-        final role = (data?['role'] ?? data?['accountType'] ?? 'student')
-            .toString()
-            .trim()
-            .toLowerCase();
+        final profile = snapshot.data;
+        if (profile?.disabled == true) {
+          unawaited(FirebaseAuth.instance.signOut());
+          return const LoginPage();
+        }
 
-        if (role == 'librarian') {
+        if (profile?.role == 'admin') {
+          return const AdminPage();
+        }
+
+        if (profile?.role == 'librarian') {
           return const LibrarianPage();
         }
 

@@ -121,6 +121,7 @@ class BorrowService {
         'studentUid': studentUid,
         'borrowerName': studentName,
         'status': 'borrowed',
+        'penaltyStatus': 'none',
         'scanMode': 'borrow',
         'borrowed_at': FieldValue.serverTimestamp(),
         'borrowedAt': FieldValue.serverTimestamp(),
@@ -199,7 +200,9 @@ class BorrowService {
       // Mark the borrow record as returned.
       tx.set(borrowRef, {
         'status': 'returned',
+        'penaltyStatus': 'cleared',
         'scanMode': 'return',
+        'overdueClearedAt': FieldValue.serverTimestamp(),
         'returned_at': FieldValue.serverTimestamp(),
         'returnedAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
